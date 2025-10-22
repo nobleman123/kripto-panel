@@ -1,710 +1,478 @@
+# app.py - Düzeltilmiş ve NaN-safe sürüm
 import streamlit as st
 import pandas as pd
 import numpy as np
 import pandas_ta as ta
-from datetime import datetime
+from binance.client import Client
 import requests
-import io
+from datetime import datetime
+from PIL import Image
+from io import BytesIO
 
-# -------------------------------
-# Sayfa Yapılandırması (Modern Dashboard)
-# -------------------------------
-st.set_page_config(
-    page_title="Pro Kripto Vadeli Sinyal Paneli",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="Pro Vadeli Sinyal Paneli", layout="wide", initial_sidebar_state="expanded")
 
-# -------------------------------
-# CSS Stilleri (İsteğe Bağlı Görsellik)
-# -------------------------------
+# ---------------- CSS
 st.markdown("""
 <style>
-    /* Ana arkaplan */
-    .stApp {
-        background-color: #0F172A; /* Koyu tema */
-    }
-    
-    /* Başlık */
-    h1 {
-        color: #F8FAFC;
-        font-weight: 700;
-    }
-    h2, h3 {
-        color: #E2E8F0;
-    }
-
-    /* Yan menü */
-    [data-testid="stSidebar"] {
-        background-color: #1E293B;
-    }
-    
-    /* Bilgi kutusu (yeni özet için) */
-    .stAlert {
-        background-color: #1E293B;
-        border: 1px solid #334155;
-        color: #E2E8F0;
-    }
-
-    /* Sonuç tablosu satırları */
-    .result-row {
-        display: grid;
-        grid-template-columns: 2fr 1fr 1.5fr 1fr 1fr 1fr 0.5fr;
-        align-items: center;
-        padding: 8px 12px;
-        border-bottom: 1px solid #334155;
-        transition: background-color 0.2s;
-    }
-    .result-row:hover {
-        background-color: #334155;
-    }
-    .result-header {
-        font-weight: 700;
-        color: #94A3B8;
-        background-color: #1E293B;
-    }
-    
-    /* Coin logosu ve ismi */
-    .coin-logo {
-        width: 28px;
-        height: 28px;
-        margin-right: 10px;
-        vertical-align: middle;
-    }
-    .coin-name {
-        font-size: 1.1em;
-        font-weight: 600;
-        color: #F1F5F9;
-        vertical-align: middle;
-    }
-    
-    /* Skor çubuğu */
-    .score-bar-container {
-        width: 100%;
-        background-color: #374151;
-        border-radius: 4px;
-        height: 18px;
-        overflow: hidden;
-    }
-    .score-bar {
-        height: 100%;
-        color: #111827;
-        font-size: 12px;
-        font-weight: 600;
-        text-align: center;
-        line-height: 18px;
-    }
-    
-    /* Renkler */
-    .green { background-color: #22C55E; }
-    .light-green { background-color: #84CC16; }
-    .yellow { background-color: #EAB308; }
-    .orange { background-color: #F97316; }
-    .red { background-color: #EF4444; }
-    
-    .text-green { color: #22C55E; }
-    .text-light-green { color: #84CC16; }
-    .text-yellow { color: #EAB308; }
-    .text-orange { color: #F97316; }
-    .text-red { color: #EF4444; }
-    .text-gray { color: #94A3B8; }
-
+body { background: #0b0f14; color: #d6d9de; }
+.panel-card { background: #101820; padding:12px; border-radius:12px; border:1px solid rgba(255,255,255,0.05); }
+.coin-row:hover { background: rgba(255,255,255,0.03); border-radius:8px; }
+.small-muted { color:#9aa3b2; font-size:12px; }
+.score-big { font-size:20px; font-weight:800; }
+.badge { padding:6px 8px; border-radius:8px; font-weight:700; }
+.green { background:#064e3b; color:#66ffb2; }
+.red { background:#5b1220; color:#ff9b9b; }
+.yellow { background:#5a4b0c; color:#ffe48d; }
 </style>
 """, unsafe_allow_html=True)
 
+# ---------------- Config
+DEFAULT_TIMEFRAMES = ['15m', '1h', '4h']
+ALL_TIMEFRAMES = ['15m','30m','1h','4h','1d']
+DEFAULT_WEIGHTS = {'ema':25,'macd':20,'rsi':15,'bb':10,'adx':7,'vol':10,'funding':30}
 
-# -------------------------------
-# Veri Çekme Fonksiyonları (Futures API ile)
-# -------------------------------
-
-@st.cache_data(ttl=600)
-def get_all_futures_symbols():
-    """Tüm Binance Vadeli (USDT Perpetual) coin listesini çeker."""
+def safe_int_or_dash(val):
+    """Return int string if val is finite number, else '-'"""
+    if val is None:
+        return '-'
     try:
-        url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
-        data = requests.get(url, timeout=10).json()
-        symbols = [
-            s['symbol'] for s in data['symbols']
-            if s['status'] == 'TRADING' and s['quoteAsset'] == 'USDT' and s['contractType'] == 'PERPETUAL'
-        ]
-        return sorted(symbols)
-    except Exception as e:
-        st.sidebar.error(f"Sembol listesi alınamadı: {e}")
-        return ["BTCUSDT", "ETHUSDT"]
+        if pd.isna(val):
+            return '-'
+    except Exception:
+        pass
+    try:
+        return str(int(val))
+    except Exception:
+        return '-'
 
+def get_coin_logo(symbol):
+    base = symbol.replace('USDT','').lower()
+    try:
+        url = f"https://assets.coincap.io/assets/icons/{base}@2x.png"
+        r = requests.get(url, timeout=3)
+        if r.status_code == 200:
+            return url
+    except Exception:
+        pass
+    return None
+
+@st.cache_resource
+def get_binance_client(api_key, api_secret):
+    try:
+        if api_key and api_secret:
+            c = Client(api_key, api_secret)
+        else:
+            c = Client()
+        c.ping()
+        return c
+    except Exception as e:
+        st.error(f"Binance bağlantısında hata: {e}")
+        return None
+
+# ---------------- Cache-uyumlu fetcher'lar (parametre isimleri _client olacak)
 @st.cache_data(ttl=300)
-def get_top_symbols_by_volume(top_n=100):
-    """Hacme göre en iyi N coini çeker."""
+def get_all_futures_symbols(_client):
     try:
-        url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
-        data = requests.get(url, timeout=10).json()
-        df = pd.DataFrame(data)
-        df['quoteVolume'] = pd.to_numeric(df['quoteVolume'])
-        usdt_pairs = df[df['symbol'].str.endswith('USDT')].sort_values(by="quoteVolume", ascending=False)
-        return usdt_pairs.head(top_n)['symbol'].tolist()
-    except Exception as e:
-        st.sidebar.error(f"Top coinler alınamadı: {e}")
-        return get_all_futures_symbols()[:top_n]
+        info = _client.futures_exchange_info()
+        syms = [s['symbol'] for s in info['symbols']
+                if s['status']=='TRADING' and s['quoteAsset']=='USDT' and s['contractType']=='PERPETUAL']
+        return sorted(syms)
+    except Exception:
+        return ['BTCUSDT','ETHUSDT']
 
 @st.cache_data(ttl=60)
-def fetch_futures_klines(symbol, interval, limit=400):
-    """Binance Futures API'sinden kline verisi çeker."""
+def get_top_by_volume(_client, limit=100):
     try:
-        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}"
-        data = requests.get(url, timeout=10).json()
-        df = pd.DataFrame(data, columns=[
-            "time", "open", "high", "low", "close", "volume", "close_time",
-            "quote_asset_volume", "trades", "tb_base_volume", "tb_quote_volume", "ignore"
-        ])
-        df = df.astype(float)
-        df = df[["time", "open", "high", "low", "close", "volume"]]
-        df['time'] = pd.to_datetime(df['time'], unit='ms')
+        tickers = _client.futures_ticker()
+        usdt = [t for t in tickers if t['symbol'].endswith('USDT')]
+        sorted_t = sorted(usdt, key=lambda x: float(x.get('quoteVolume',0)), reverse=True)
+        return [t['symbol'] for t in sorted_t[:limit]]
+    except Exception:
+        return get_all_futures_symbols(_client)[:limit]
+
+@st.cache_data(ttl=60)
+def fetch_klines(_client, symbol, interval, limit=500):
+    try:
+        kl = _client.futures_klines(symbol=symbol, interval=interval, limit=limit)
+        df = pd.DataFrame(kl, columns=['timestamp','open','high','low','close','volume','close_time','qav','n_trades','taker_buy_base','taker_buy_quote','ignore'])
+        df = df[['timestamp','open','high','low','close','volume']]
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        for c in ['open','high','low','close','volume']:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
         return df
     except Exception:
         return pd.DataFrame()
 
-@st.cache_data(ttl=60)
-def fetch_funding_rate(symbol):
-    """Tek bir coin için anlık fonlama oranını çeker."""
+@st.cache_data(ttl=300)
+def fetch_sentiment(_client, symbol):
+    data = {}
     try:
-        url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}"
-        data = requests.get(url, timeout=5).json()
-        return float(data.get('lastFundingRate', 0))
+        fr = _client.futures_funding_rate(symbol=symbol, limit=1)[0]
+        data['fundingRate'] = float(fr.get('fundingRate',0))
     except Exception:
-        return 0.0
+        data['fundingRate'] = 0.0
+    try:
+        oi = _client.futures_open_interest(symbol=symbol)
+        data['openInterest'] = float(oi.get('openInterest',0))
+    except Exception:
+        data['openInterest'] = 0.0
+    try:
+        ls = _client.futures_top_long_short_account_ratio(symbol=symbol, period='5m', limit=1)[0]
+        data['ls_long'] = float(ls.get('longAccount',0.5))
+        data['ls_short'] = float(ls.get('shortAccount',0.5))
+    except Exception:
+        data['ls_long'] = 0.5
+        data['ls_short'] = 0.5
+    return data
 
-def get_coin_logo_url(symbol):
-    """Coin logosu için URL döndürür."""
-    base_symbol = symbol.replace("USDT", "").lower()
-    return f"https://raw.githubusercontent.com/atomiclabs/cryptocurrency-icons/master/128/color/{base_symbol}.png"
-
-# -------------------------------
-# Analiz ve Puanlama Fonksiyonları
-# -------------------------------
-
+# ---------------- Indicators (defensive)
 def compute_indicators(df):
-    """Gelişmiş göstergeleri hesaplar (Vortex ve CHOP eklendi)."""
     df = df.copy()
-    
-    # Trend
-    df['ema20'] = ta.ema(df['close'], length=20)
-    df['ema50'] = ta.ema(df['close'], length=50)
-    df['ema200'] = ta.ema(df['close'], length=200)
-    df['adx14'] = ta.adx(df['high'], df['low'], df['close']).iloc[:, 0] # Sadece ADX hattı
-
-    # Momentum
-    macd = ta.macd(df['close'])
-    if isinstance(macd, pd.DataFrame) and not macd.empty:
-        df['macd_line'] = macd.iloc[:, 0]
-        df['macd_hist'] = macd.iloc[:, 1]
-    
-    df['rsi14'] = ta.rsi(df['close'], length=14)
-    df['mfi14'] = ta.mfi(df['high'], df['low'], df['close'], df['volume'], length=14)
-
-    # Volatilite / Aşırılık
-    bb = ta.bbands(df['close'])
-    if isinstance(bb, pd.DataFrame) and not bb.empty:
-        df['bb_lower'] = bb.iloc[:, 0]
-        df['bb_upper'] = bb.iloc[:, 2]
-
-    # YENİ: Vortex Indicator (Trend Yönü)
-    vortex = ta.vortex(df['high'], df['low'], df['close'])
-    if isinstance(vortex, pd.DataFrame) and not vortex.empty:
-        df['vortex_pos'] = vortex.iloc[:, 0] # VI+
-        df['vortex_neg'] = vortex.iloc[:, 1] # VI-
-    
-    # YENİ: Choppiness Index (Piyasa Durumu: Trend / Yönsüz)
-    df['chop'] = ta.chop(df['high'], df['low'], df['close'], length=14)
-
-    df.dropna(inplace=True)
+    # compute indicators defensively
+    try:
+        df['ema20'] = ta.ema(df['close'], length=20)
+        df['ema50'] = ta.ema(df['close'], length=50)
+        df['ema200'] = ta.ema(df['close'], length=200)
+    except Exception:
+        df['ema20']=df['ema50']=df['ema200']=np.nan
+    try:
+        macd = ta.macd(df['close'])
+        if isinstance(macd, pd.DataFrame) and macd.shape[1] >= 2:
+            df['macd_hist'] = macd.iloc[:,1]
+        else:
+            df['macd_hist'] = np.nan
+    except Exception:
+        df['macd_hist'] = np.nan
+    try:
+        df['rsi14'] = ta.rsi(df['close'], length=14)
+    except Exception:
+        df['rsi14'] = np.nan
+    try:
+        bb = ta.bbands(df['close'])
+        if isinstance(bb, pd.DataFrame) and bb.shape[1] >= 3:
+            df['bb_lower'] = bb.iloc[:,0]; df['bb_mid'] = bb.iloc[:,1]; df['bb_upper'] = bb.iloc[:,2]
+        else:
+            df['bb_lower']=df['bb_mid']=df['bb_upper']=np.nan
+    except Exception:
+        df['bb_lower']=df['bb_mid']=df['bb_upper']=np.nan
+    try:
+        adx = ta.adx(df['high'], df['low'], df['close'])
+        df['adx14'] = adx['ADX_14'] if isinstance(adx, pd.DataFrame) and 'ADX_14' in adx.columns else np.nan
+    except Exception:
+        df['adx14'] = np.nan
+    try:
+        df['mfi14'] = ta.mfi(df['high'], df['low'], df['close'], df['volume'], length=14)
+    except Exception:
+        df['mfi14'] = np.nan
+    try:
+        df['vol_ma_short'] = ta.sma(df['volume'], length=20)
+        df['vol_ma_long'] = ta.sma(df['volume'], length=50)
+        df['vol_osc'] = (df['vol_ma_short'] - df['vol_ma_long']) / (df['vol_ma_long'] + 1e-9)
+    except Exception:
+        df['vol_osc'] = np.nan
+    # dropna to keep rows where indicators exist
+    df = df.dropna()
     return df
 
-def map_score_label(score):
-    if score >= 70: return "GÜÇLÜ AL"
-    elif score >= 30: return "AL"
-    elif score <= -70: return "GÜÇLÜ SAT"
-    elif score <= -30: return "SAT"
-    else: return "NÖTR"
+def label_from_score(score, thresholds):
+    strong_buy_t, buy_t, sell_t, strong_sell_t = thresholds
+    if score is None:
+        return "NO DATA"
+    if score >= strong_buy_t: return "GÜÇLÜ AL"
+    if score >= buy_t: return "AL"
+    if score <= strong_sell_t: return "GÜÇLÜ SAT"
+    if score <= sell_t: return "SAT"
+    return "TUT"
 
-def get_score_color(score):
-    if score >= 70: return "green", "#22C55E"
-    elif score >= 30: return "light-green", "#84CC16"
-    elif score > -30: return "yellow", "#EAB308"
-    elif score > -70: return "orange", "#F97316"
-    else: return "red", "#EF4444"
-
-def get_trend_icon(score):
-    if score >= 30: return "📈"
-    elif score <= -30: return "📉"
-    else: return "📊"
-
-def get_detail_summary(scores, latest_data):
-    """(YENİ) Puanlara ve verilere göre bilgilendirici bir özet oluşturur."""
-    
-    summary_parts = []
-    
-    # 1. Trend Durumu
-    ema_score = scores.get('EMA', 0)
-    vortex_score = scores.get('Vortex', 0)
-    adx_val = latest_data.get('adx14', 0)
-    
-    if ema_score > 0 and vortex_score > 0:
-        summary_parts.append("güçlü bir yükseliş trendi")
-    elif ema_score < 0 and vortex_score < 0:
-        summary_parts.append("güçlü bir düşüş trendi")
-    elif ema_score > 0 or vortex_score > 0:
-        summary_parts.append("zayıf bir yükseliş eğilimi")
-    elif ema_score < 0 or vortex_score < 0:
-        summary_parts.append("zayıf bir düşüş eğilimi")
-    else:
-        summary_parts.append("yönsüz bir trend")
-        
-    if adx_val > 25:
-        summary_parts.append(f"(ADX {adx_val:.0f} ile trendi onaylıyor)")
-    else:
-        summary_parts.append(f"(ADX {adx_val:.0f} ile zayıf trend)")
-
-    # 2. Piyasa Yapısı (CHOP)
-    chop_val = latest_data.get('chop', 50)
-    if chop_val < 38.2:
-        summary_parts.append("Piyasa 'Trend' modunda (CHOP < 38.2),")
-    elif chop_val > 61.8:
-        summary_parts.append("Piyasa 'Yönsüz/Sıkışık' (CHOP > 61.8),")
-    else:
-        summary_parts.append("Piyasa 'Kararsız' yapıda,")
-
-    # 3. Momentum
-    rsi_val = latest_data.get('rsi14', 50)
-    if rsi_val > 70:
-        summary_parts.append("momentum aşırı alımda.")
-    elif rsi_val < 30:
-        summary_parts.append("momentum aşırı satımda.")
-    else:
-        summary_parts.append("momentum nötr bölgede.")
-        
-    # 4. Sentiment
-    funding_score = scores.get('Funding', 0)
-    if funding_score > 0:
-        summary_parts.append("Piyasa geneli (kontra) alım yönlü bir baskı yaratıyor.")
-    elif funding_score < 0:
-        summary_parts.append("Piyasa geneli (kontra) satım yönlü bir baskı yaratıyor.")
-        
-    return " ".join(summary_parts)
-
-
-def score_latest_signals(df_latest, df_prev, funding_rate, weights):
-    """İndikatörlere göre puanlama yapar (Vortex ve CHOP eklendi)."""
-    total, scores, reasons = 0, {}, []
-    
+def score_signals(latest, prev, sentiment, weights):
+    scores = {}
+    reasons = []
+    total = 0
+    # EMA
     try:
-        # EMA Puanı (Trend)
-        ema_score = 0
-        if df_latest['ema20'] > df_latest['ema50'] > df_latest['ema200']:
-            ema_score = weights['ema']
-            reasons.append(f"EMA Yükseliş Dizilimi (+{weights['ema']})")
-        elif df_latest['ema20'] < df_latest['ema50'] < df_latest['ema200']:
-            ema_score = -weights['ema']
-            reasons.append(f"EMA Düşüş Dizilimi (-{weights['ema']})")
-        scores['EMA'] = ema_score
-        total += ema_score
-    except Exception: pass
-
+        if latest['ema20'] > latest['ema50'] > latest['ema200']:
+            scores['ema'] = weights['ema']; reasons.append('EMA ↑'); total += scores['ema']
+        elif latest['ema20'] < latest['ema50'] < latest['ema200']:
+            scores['ema'] = -weights['ema']; reasons.append('EMA ↓'); total += scores['ema']
+        else:
+            scores['ema'] = 0
+    except Exception:
+        scores['ema'] = 0
+    # MACD hist
     try:
-        # RSI Puanı (Momentum/Aşırılık)
-        rsi = df_latest['rsi14']
-        rsi_score = 0
-        if rsi < 30:
-            rsi_score = weights['rsi']
-            reasons.append(f"RSI Aşırı Satım (< 30) (+{weights['rsi']})")
-        elif rsi > 70:
-            rsi_score = -weights['rsi']
-            reasons.append(f"RSI Aşırı Alım (> 70) (-{weights['rsi']})")
-        scores['RSI'] = rsi_score
-        total += rsi_score
-    except Exception: pass
-
+        if prev.get('macd_hist', np.nan) < 0 and latest.get('macd_hist', np.nan) > 0:
+            scores['macd'] = weights['macd']; reasons.append('MACD ↑'); total += scores['macd']
+        elif prev.get('macd_hist', np.nan) > 0 and latest.get('macd_hist', np.nan) < 0:
+            scores['macd'] = -weights['macd']; reasons.append('MACD ↓'); total += scores['macd']
+        else:
+            scores['macd'] = 0
+    except Exception:
+        scores['macd'] = 0
+    # RSI
     try:
-        # MACD Puanı (Momentum Kesişim)
-        macd_score = 0
-        if df_prev['macd_hist'] < 0 and df_latest['macd_hist'] > 0:
-            macd_score = weights['macd']
-            reasons.append(f"MACD Pozitif Kesişim (+{weights['macd']})")
-        elif df_prev['macd_hist'] > 0 and df_latest['macd_hist'] < 0:
-            macd_score = -weights['macd']
-            reasons.append(f"MACD Negatif Kesişim (-{weights['macd']})")
-        scores['MACD'] = macd_score
-        total += macd_score
-    except Exception: pass
-
+        if latest.get('rsi14', np.nan) < 30:
+            scores['rsi'] = weights['rsi']; reasons.append('RSI oversold'); total += scores['rsi']
+        elif latest.get('rsi14', np.nan) > 70:
+            scores['rsi'] = -weights['rsi']; reasons.append('RSI overbought'); total += scores['rsi']
+        else:
+            scores['rsi'] = 0
+    except Exception:
+        scores['rsi'] = 0
+    # Bollinger
     try:
-        # Bollinger Puanı (Volatilite/Aşırılık)
-        bb_score = 0
-        if df_latest['close'] > df_latest['bb_upper']:
-            bb_score = -int(weights['bb'] * 0.5) # Aşırı alım, geri çekilme
-            reasons.append(f"Bollinger Üst Bandı Aşıldı (-{int(weights['bb'] * 0.5)})")
-        elif df_latest['close'] < df_latest['bb_lower']:
-            bb_score = weights['bb']
-            reasons.append(f"Bollinger Alt Bandı Aşıldı (+{weights['bb']})")
-        scores['Bollinger'] = bb_score
-        total += bb_score
-    except Exception: pass
-
+        if not pd.isna(latest.get('bb_upper')) and latest['close'] > latest['bb_upper']:
+            scores['bb'] = weights['bb']; reasons.append('BB upper'); total += scores['bb']
+        elif not pd.isna(latest.get('bb_lower')) and latest['close'] < latest['bb_lower']:
+            scores['bb'] = -weights['bb']; reasons.append('BB lower'); total += scores['bb']
+        else:
+            scores['bb'] = 0
+    except Exception:
+        scores['bb'] = 0
+    # ADX
     try:
-        # ADX Puanı (Trend Gücü Filtresi)
-        adx_score = 0
-        if df_latest['adx14'] > 25:
-            # Puanı, mevcut trend yönünde (EMA skoru) güçlendir
-            adx_score = weights['adx'] * np.sign(scores.get('EMA', 0))
-            reasons.append(f"ADX Güçlü Trend (> 25) ({'+' if adx_score >= 0 else ''}{adx_score})")
-        scores['ADX'] = adx_score
-        total += adx_score
-    except Exception: pass
-    
+        if latest.get('adx14', 0) > 25:
+            scores['adx'] = int(weights['adx'] * 0.5); total += scores['adx']
+        else:
+            scores['adx'] = 0
+    except Exception:
+        scores['adx'] = 0
+    # Volume oscillator
     try:
-        # YENİ: Vortex Puanı (Trend Kesişimi)
-        vortex_score = 0
-        if df_prev['vortex_pos'] < df_prev['vortex_neg'] and df_latest['vortex_pos'] > df_latest['vortex_neg']:
-            vortex_score = weights['vortex'] # Bullish kesişim
-            reasons.append(f"Vortex Pozitif Kesişim (+{weights['vortex']})")
-        elif df_prev['vortex_pos'] > df_prev['vortex_neg'] and df_latest['vortex_pos'] < df_latest['vortex_neg']:
-            vortex_score = -weights['vortex'] # Bearish kesişim
-            reasons.append(f"Vortex Negatif Kesişim (-{weights['vortex']})")
-        scores['Vortex'] = vortex_score
-        total += vortex_score
-    except Exception: pass
-        
+        if latest.get('vol_osc', 0) > 0.4:
+            scores['vol'] = weights['vol']; total += scores['vol']
+        elif latest.get('vol_osc', 0) < -0.4:
+            scores['vol'] = -weights['vol']; total += scores['vol']
+        else:
+            scores['vol'] = 0
+    except Exception:
+        scores['vol'] = 0
+    # MFI
     try:
-        # YENİ: Choppiness Puanı (Piyasa Yapısı Filtresi)
-        chop_score = 0
-        chop = df_latest['chop']
-        trend_direction = np.sign(scores.get('EMA', 0) + scores.get('MACD', 0))
-        
-        if chop < 38.2: # Güçlü Trend
-            chop_score = int(weights['chop'] * trend_direction)
-            reasons.append(f"Güçlü Trend (CHOP < 38.2) ({'+' if chop_score >= 0 else ''}{chop_score})")
-        elif chop > 61.8: # Yönsüz Piyasa
-            chop_score = -int(weights['chop'] * trend_direction) # Trend sinyallerini zayıflat
-            reasons.append(f"Yönsüz Piyasa (CHOP > 61.8) ({'+' if chop_score >= 0 else ''}{chop_score})")
-        scores['CHOP'] = chop_score
-        total += chop_score
-    except Exception: pass
-    
+        if latest.get('mfi14', np.nan) < 20:
+            scores['mfi'] = int(weights['rsi']*0.5); total += scores['mfi']
+        elif latest.get('mfi14', np.nan) > 80:
+            scores['mfi'] = -int(weights['rsi']*0.5); total += scores['mfi']
+        else:
+            scores['mfi'] = 0
+    except Exception:
+        scores['mfi'] = 0
+    # Sentiment (funding)
     try:
-        # Fonlama Oranı Puanı (Kontra-Sentiment)
-        funding_score = 0
-        if funding_rate > 0.0005: # Piyasada longlar baskın
-            funding_score = -weights['funding'] # Kontra (ters) sinyal
-            reasons.append(f"Yüksek Pozitif Fonlama (Kontra SAT) (-{weights['funding']})")
-        elif funding_rate < -0.0005: # Piyasada shortlar baskın
-            funding_score = weights['funding'] # Kontra (ters) sinyal
-            reasons.append(f"Yüksek Negatif Fonlama (Kontra AL) (+{weights['funding']})")
-        scores['Funding'] = funding_score
-        total += funding_score
-    except Exception: pass
+        fr = sentiment.get('fundingRate', 0)
+        if fr > 0.0006:
+            scores['funding'] = -weights['funding']; total += scores['funding']
+        elif fr < -0.0006:
+            scores['funding'] = weights['funding']; total += scores['funding']
+        else:
+            scores['funding'] = 0
+    except Exception:
+        scores['funding'] = 0
 
-    total = int(max(min(total, 100), -100)) # Skoru -100 ile +100 arasında sınırla
-    label = map_score_label(total)
-    trend_icon = get_trend_icon(total)
-    
-    # Bilgilendirici özet için 'latest_data' ve 'scores' kullanılır
-    summary = get_detail_summary(scores, df_latest)
-    
-    return total, scores, reasons, label, trend_icon, summary, df_latest
+    total = int(max(min(total, 100), -100))
+    return total, scores, reasons
 
-@st.cache_data
-def convert_df_to_csv(df):
-   return df.to_csv(index=False).encode('utf-8')
+# ---------------- Scan engine (defensive checks)
+@st.cache_data(ttl=120)
+def run_scan(_client, symbols, timeframes, weights, thresholds, top_n=100):
+    results = []
+    for sym in symbols[:top_n]:
+        entry = {'symbol': sym, 'details': {}}
+        best_score = None
+        best_tf = None
+        buy_count = 0; strong_buy_count = 0; sell_count = 0
 
-# -------------------------------
-# Streamlit UI - Yan Menü (Sidebar)
-# -------------------------------
+        for tf in timeframes:
+            try:
+                df = fetch_klines(_client=_client, symbol=sym, interval=tf, limit=400)
+                if df is None or df.empty or len(df) < 30:
+                    entry['details'][tf] = None
+                    continue
+                df_ind = compute_indicators(df)
+                if df_ind is None or len(df_ind) < 3:
+                    entry['details'][tf] = None
+                    continue
+                latest = df_ind.iloc[-1]
+                prev = df_ind.iloc[-2]
+                sentiment = fetch_sentiment(_client=_client, symbol=sym)
+                score, per_scores, reasons = score_signals(latest, prev, sentiment, weights)
+                label = label_from_score(score, thresholds)
+                entry['details'][tf] = {'score': int(score), 'label': label, 'price': float(latest['close']), 'per_scores': per_scores, 'reasons': reasons}
+                if best_score is None or score > best_score:
+                    best_score = score; best_tf = tf
+                if label in ['AL','GÜÇLÜ AL']: buy_count += 1
+                if label == 'GÜÇLÜ AL': strong_buy_count += 1
+                if label in ['SAT','GÜÇLÜ SAT']: sell_count += 1
+            except Exception:
+                entry['details'][tf] = None
+                continue
 
-st.sidebar.title("Ayarlar ve Tarama")
-st.sidebar.markdown("---")
+        entry['best_timeframe'] = best_tf
+        entry['best_score'] = int(best_score) if best_score is not None else None
+        entry['buy_count'] = buy_count
+        entry['strong_buy_count'] = strong_buy_count
+        entry['sell_count'] = sell_count
+        results.append(entry)
+    return pd.DataFrame(results)
 
-# 1. Coin Seçimi
-st.sidebar.subheader("1. Coin Listesi Seçimi")
-scan_mode = st.sidebar.radio(
-    "Hangi coinler taransın?",
-    ["En Popüler (Hacim)", "Tüm Vadeli Coinler", "Özel Liste"],
-    index=0,
-    key="scan_mode"
-)
+# ---------------- Sidebar / inputs
+st.sidebar.title("⚙️ Ayarlar")
+api_key = st.sidebar.text_input("Binance API Key (opsiyonel)", type="password")
+api_secret = st.sidebar.text_input("Binance Secret (opsiyonel)", type="password")
+client = get_binance_client(api_key.strip(), api_secret.strip())
+if client is None:
+    st.stop()
 
-all_symbols_list = get_all_futures_symbols()
-symbols_to_scan = []
+col_choice = st.sidebar.radio("Coin listesi", ["Top 50","Top 100","All USDT Perp","Custom list"])
+if col_choice == "Custom list":
+    custom_input = st.sidebar.text_area("Virgülle ayrılmış coinler", value="BTCUSDT,ETHUSDT")
+    symbols = [s.strip().upper() for s in custom_input.split(',') if s.strip()]
+elif col_choice == "Top 50":
+    symbols = get_top_by_volume(_client=client, limit=50)
+elif col_choice == "Top 100":
+    symbols = get_top_by_volume(_client=client, limit=100)
+else:
+    symbols = get_all_futures_symbols(_client=client)
 
-if scan_mode == "En Popüler (Hacim)":
-    top_n = st.sidebar.selectbox("Popüler Coin Sayısı", [50, 100, 200], index=1)
-    symbols_to_scan = get_top_symbols_by_volume(top_n)
-elif scan_mode == "Tüm Vadeli Coinler":
-    symbols_to_scan = all_symbols_list
-    st.sidebar.info(f"{len(symbols_to_scan)} adet coin taranacak. Bu işlem uzun sürebilir.")
-else: # Özel Liste
-    symbols_to_scan = st.sidebar.multiselect(
-        "Coinleri Seçin",
-        all_symbols_list,
-        default=["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
-    )
+timeframes = st.sidebar.multiselect("Zaman dilimleri", ALL_TIMEFRAMES, DEFAULT_TIMEFRAMES)
 
-# 2. Zaman Dilimi
-st.sidebar.subheader("2. Zaman Dilimi Seçimi")
-scan_timeframes = st.sidebar.multiselect(
-    "Tarama zaman dilimleri:",
-    ["5m", "15m", "30m", "1h", "4h", "1d"],
-    default=["1h", "4h", "1d"]
-)
+max_possible = min(500, max(10, len(symbols)))
+top_n = st.sidebar.slider("Kaç coin taransın (ilk N)", min_value=10, max_value=max_possible, value=min(100, max_possible))
 
-# 3. Filtreler
-st.sidebar.subheader("3. Sonuç Filtreleri")
-filter_strong_only = st.sidebar.checkbox("Yalnızca 'Güçlü Al / Sat' göster")
-filter_min_tf = st.sidebar.checkbox("Sadece '1h' ve üzeri TF'leri göster", value=True)
+with st.sidebar.expander("Gösterge ağırlıkları"):
+    w_ema = st.number_input("EMA", value=DEFAULT_WEIGHTS['ema'], step=1)
+    w_macd = st.number_input("MACD", value=DEFAULT_WEIGHTS['macd'], step=1)
+    w_rsi = st.number_input("RSI", value=DEFAULT_WEIGHTS['rsi'], step=1)
+    w_bb = st.number_input("Bollinger", value=DEFAULT_WEIGHTS['bb'], step=1)
+    w_adx = st.number_input("ADX", value=DEFAULT_WEIGHTS['adx'], step=1)
+    w_vol = st.number_input("Volume", value=DEFAULT_WEIGHTS['vol'], step=1)
+    w_funding = st.number_input("Funding/OI", value=DEFAULT_WEIGHTS['funding'], step=1)
+weights = {'ema': w_ema, 'macd': w_macd, 'rsi': w_rsi, 'bb': w_bb, 'adx': w_adx, 'vol': w_vol, 'funding': w_funding}
 
-# 4. Tarama Butonu
-st.sidebar.markdown("---")
-scan_button = st.sidebar.button("🔍 Taramayı Başlat", type="primary", use_container_width=True)
+with st.sidebar.expander("Sinyal eşikleri"):
+    strong_buy_t = st.slider("GÜÇLÜ AL ≥", 10, 100, 60)
+    buy_t = st.slider("AL ≥", 0, 80, 20)
+    sell_t = st.slider("SAT ≤", -80, 0, -20)
+    strong_sell_t = st.slider("GÜÇLÜ SAT ≤", -100, -10, -60)
+thresholds = (strong_buy_t, buy_t, sell_t, strong_sell_t)
 
-# -------------------------------
-# Ana Panel - Başlık
-# -------------------------------
-st.title("💹 Kripto Vadeli Sinyal Paneli")
+scan_button = st.sidebar.button("🔍 Tara / Yenile")
 
-# İndikatör Ağırlıkları (Gelişmiş ayar, expander içinde)
-with st.expander("Gelişmiş: İndikatör Ağırlık Ayarları"):
-    st.markdown("##### Trend ve Momentum Ağırlıkları")
-    col_w1, col_w2, col_w3 = st.columns(3)
-    with col_w1:
-        w_ema = st.slider("EMA Ağırlığı", 0, 30, 15, key="w_ema")
-        w_rsi = st.slider("RSI Ağırlığı", 0, 30, 10, key="w_rsi")
-    with col_w2:
-        w_macd = st.slider("MACD Ağırlığı", 0, 30, 15, key="w_macd")
-        w_bb = st.slider("Bollinger Ağırlığı", 0, 30, 5, key="w_bb")
-    with col_w3:
-        w_adx = st.slider("ADX (Trend Gücü) Ağırlığı", 0, 30, 10, key="w_adx")
-        w_mfi = st.slider("MFI Ağırlığı (dahil değil)", 0, 30, 0, key="w_mfi", disabled=True) # MFI şu an skorda yok
+# ---------------- Main UI
+st.title("📊 Pro Vadeli Sinyal Paneli")
+st.caption("SB = Strong Buy sayısı (kaç TF'de 'GÜÇLÜ AL' olduğu).")
 
-    st.markdown("##### Komplike İndikatör Ağırlıkları")
-    col_w4, col_w5, col_w6 = st.columns(3)
-    with col_w4:
-        w_vortex = st.slider("Vortex Ağırlığı (Kesişim)", 0, 30, 20, key="w_vortex")
-    with col_w5:
-        w_chop = st.slider("CHOP Ağırlığı (Filtre)", 0, 30, 10, key="w_chop")
-    with col_w6:
-        w_funding = st.slider("Fonlama Ağırlığı (Kontra)", 0, 30, 15, key="w_funding")
-    
-    weights = {
-        'ema': w_ema, 'rsi': w_rsi, 'macd': w_macd, 'bb': w_bb, 'adx': w_adx,
-        'vortex': w_vortex, 'chop': w_chop, 'funding': w_funding
-    }
-
-# -------------------------------
-# Tarama Mantığı
-# -------------------------------
-if "results" not in st.session_state:
-    st.session_state.results = []
+if 'scan_results' not in st.session_state: st.session_state.scan_results = pd.DataFrame()
+if 'open_symbol' not in st.session_state: st.session_state.open_symbol = None
+if 'open_details' not in st.session_state: st.session_state.open_details = None
 
 if scan_button:
-    if not symbols_to_scan or not scan_timeframes:
-        st.error("Lütfen taranacak en az bir coin ve bir zaman dilimi seçin.")
-    else:
-        st.session_state.results = []
-        progress_bar = st.progress(0, text="Tarama başlatılıyor...")
-        total_symbols = len(symbols_to_scan)
-        
-        for i, sym in enumerate(symbols_to_scan):
-            progress_bar.progress((i + 1) / total_symbols, text=f"[{i+1}/{total_symbols}] {sym} taranıyor...")
-            
-            try:
-                funding_rate = fetch_funding_rate(sym)
-                
-                best_tf, best_score, details = None, -999, {}
-                strong_buys, strong_sells = 0, 0
-                
-                for tf in scan_timeframes:
-                    df = fetch_futures_klines(sym, tf)
-                    if df.empty or len(df) < 200: 
-                        continue
-                    
-                    df = compute_indicators(df)
-                    if df.empty:
-                        continue
-                    
-                    total, scores, reasons, label, trend_icon, summary, latest_data = score_latest_signals(
-                        df.iloc[-1], df.iloc[-2], funding_rate, weights
-                    )
-                    
-                    # Detay paneli için veri sakla
-                    latest_data_dict = latest_data.to_dict()
-                    latest_data_dict['funding_rate'] = funding_rate # Fonlama oranını da ekle
-                    
-                    details[tf] = {
-                        "label": label, 
-                        "score": total, 
-                        "reasons": reasons, 
-                        "scores": scores,
-                        "summary": summary,
-                        "latest_data": latest_data_dict
-                    }
-                    
-                    if label == "GÜÇLÜ AL": strong_buys += 1
-                    if label == "GÜÇLÜ SAT": strong_sells += 1
-                    
-                    if total > best_score:
-                        best_tf, best_score = tf, total
-                
-                if best_tf:
-                    final_label = map_score_label(best_score)
-                    final_trend = get_trend_icon(best_score)
-                    st.session_state.results.append({
-                        "Coin": sym,
-                        "Logo": get_coin_logo_url(sym),
-                        "En İyi Zaman Dilimi": best_tf,
-                        "Skor": best_score,
-                        "Etiket": final_label,
-                        "SB Sayısı": strong_buys,
-                        "SS Sayısı": strong_sells,
-                        "Trend": final_trend,
-                        "Detay": details
-                    })
-            except Exception as e:
-                st.warning(f"{sym} taranırken bir hata oluştu: {e}")
-        
-        progress_bar.empty()
+    with st.spinner("Piyasa taranıyor — lütfen bekleyin..."):
+        st.session_state.scan_results = run_scan(_client=client, symbols=symbols, timeframes=timeframes, weights=weights, thresholds=thresholds, top_n=top_n)
+        st.session_state.last_scan = datetime.utcnow()
 
-# -------------------------------
-# Sonuçların Gösterimi
-# -------------------------------
-if st.session_state.results:
-    st.markdown("## 📊 Tarama Sonuçları")
-    results_df = pd.DataFrame(st.session_state.results)
-    
-    # --- Filtreleri Uygula ---
-    filtered_df = results_df.copy()
-    if filter_strong_only:
-        filtered_df = filtered_df[
-            (filtered_df['Etiket'] == "GÜÇLÜ AL") | (filtered_df['Etiket'] == "GÜÇLÜ SAT")
-        ]
-    if filter_min_tf:
-        filtered_df = filtered_df[~filtered_df['En İyi Zaman Dilimi'].str.contains('m')]
-
-    st.info(f"{len(results_df)} coin tarandı. {len(filtered_df)} sonuç filtrelendi.")
-    
-    # --- CSV İndirme Butonu ---
-    csv_data = convert_df_to_csv(filtered_df.drop(columns=['Logo', 'Detay']))
-    st.download_button(
-        label="📥 Sonuçları CSV Olarak İndir",
-        data=csv_data,
-        file_name=f"tarama_sonuclari_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-        mime="text/csv",
-    )
-    
-    # --- Modern Sonuç Tablosu ---
-    st.markdown(
-        """
-        <div class="result-row result-header">
-            <div>Coin</div>
-            <div>En İyi TF</div>
-            <div>Skor</div>
-            <div>Etiket</div>
-            <div>Trend</div>
-            <div title="Kaç zaman diliminde 'Güçlü Al/Sat' sinyali verdi?">SB/SS</div>
-            <div>Detay</div>
-        </div>
-        """, unsafe_allow_html=True
-    )
-
-    for _, row in filtered_df.sort_values(by="Skor", ascending=False).iterrows():
-        color_class, color_hex = get_score_color(row['Skor'])
-        
-        score_bar_html = f"""
-        <div class="score-bar-container" title="Skor: {row['Skor']}">
-            <div class="score-bar {color_class}" style="width: {max(5, (abs(row['Skor']) / 100) * 100)}%; background-color: {color_hex};">
-                {row['Skor']}
-            </div>
-        </div>
-        """
-        
-        row_html = f"""
-        <div class="result-row">
-            <div>
-                <img src="{row['Logo']}" class="coin-logo" onerror="this.style.display='none'">
-                <span class="coin-name">{row['Coin']}</span>
-            </div>
-            <div>{row['En İyi Zaman Dilimi']}</div>
-            <div>{score_bar_html}</div>
-            <div class="text-{color_class}" style="font-weight: 600;">{row['Etiket']}</div>
-            <div style="font-size: 1.5em;" title="{row['Trend']}">{row['Trend']}</div>
-            <div title="Güçlü Al: {row['SB Sayısı']} | Güçlü Sat: {row['SS Sayısı']}">
-                <span class="text-green">{row['SB Sayısı']}</span> / <span class="text-red">{row['SS Sayısı']}</span>
-            </div>
-        </div>
-        """
-        st.markdown(row_html, unsafe_allow_html=True)
-        
-        # --- Detay Paneli (Expander) ---
-        with st.expander(f" detayları"):
-            st.subheader(f"📊 {row['Coin']} — Detaylı Analiz")
-            
-            tf_tabs = st.tabs(list(row['Detay'].keys()))
-            
-            for i, tf in enumerate(row['Detay'].keys()):
-                with tf_tabs[i]:
-                    det = row['Detay'][tf]
-                    latest_data = det['latest_data']
-                    
-                    st.markdown(f"#### {tf} Sinyali: <span class='text-{get_score_color(det['score'])[0]}'>{det['label']} (Skor: {det['score']})</span>", unsafe_allow_html=True)
-                    
-                    # YENİ: Bilgilendirici Özet
-                    st.info(f"**Algoritmik Özet:** {det['summary']}")
-                    
-                    det_col1, det_col2 = st.columns([1, 1.5])
-                    
-                    with det_col1:
-                        st.markdown("**Ana Metrikler:**")
-                        st.metric("Kapanış Fiyatı", f"{latest_data.get('close', 0):,.4f} USDT")
-                        st.metric("RSI (14)", f"{latest_data.get('rsi14', 0):.2f}")
-                        st.metric("ADX (14)", f"{latest_data.get('adx14', 0):.2f}")
-                        st.metric("CHOP (14)", f"{latest_data.get('chop', 0):.2f}", help="< 38.2 = Trend, > 61.8 = Yönsüz")
-                        
-                        v_pos = latest_data.get('vortex_pos', 0)
-                        v_neg = latest_data.get('vortex_neg', 0)
-                        v_delta = "Yükseliş" if v_pos > v_neg else "Düşüş"
-                        st.metric("Vortex (VI+/VI-)", f"{v_pos:.2f} / {v_neg:.2f}", delta=v_delta)
-                        
-                        fr = latest_data.get('funding_rate', 0)
-                        fr_delta = "Pozitif (Kontra Sat)" if fr > 0.0001 else ("Negatif (Kontra Al)" if fr < -0.0001 else "Nötr")
-                        st.metric("Fonlama Oranı", f"{fr:.4%}", delta=fr_delta)
-
-                    with det_col2:
-                        st.markdown("**Puanlama Dağılımı:**")
-                        score_df = pd.DataFrame.from_dict(det['scores'], orient='index', columns=['Puan'])
-                        st.bar_chart(score_df)
-            
-            # TradingView Grafiği
-            st.markdown("---")
-            st.subheader("TradingView Grafiği")
-            
-            tf_map = {"5m": "5", "15m": "15", "30m": "30", "1h": "60", "4h": "240", "1d": "D"}
-            tv_interval = tf_map.get(row['En İyi Zaman Dilimi'], "60")
-            
-            st.components.v1.html(f'''
-                <div class="tradingview-widget-container" style="height:480px; width:100%">
-                  <div id="tv_{row['Coin']}_{tv_interval}"></div>
-                  <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-                  <script type="text/javascript">
-                  new TradingView.widget({{
-                      "container_id": "tv_{row['Coin']}_{tv_interval}",
-                      "symbol": "BINANCE:{row['Coin']}",
-                      "interval": "{tv_interval}",
-                      "theme": "dark",
-                      "style": "1",
-                      "locale": "tr",
-                      "hide_top_toolbar": false,
-                      "allow_symbol_change": true
-                  }});
-                  </script>
-                </div>
-            ''', height=490)
-
+dfres = st.session_state.scan_results
+if dfres is None or dfres.empty:
+    st.info("Henüz tarama yapılmadı (veya sonuç boş). Yan panelden parametreleri seçip 'Tara / Yenile' butonuna basın.")
 else:
-    st.info("Ayarları seçtikten sonra 'Taramayı Başlat' butonuna basın.")
+    # header
+    hdr = st.columns([2,1,1,3,1,1])
+    hdr[0].markdown("**Coin**"); hdr[1].markdown("**TF**"); hdr[2].markdown("**Skor**")
+    hdr[3].markdown("**Zaman Dilimleri**"); hdr[4].markdown("**SB**"); hdr[5].markdown("**Detay**")
+
+    sort_by = st.selectbox("Sırala", options=["Best Score","Strong Buy Count","Buy Count","Sell Count","Symbol"], index=0)
+    desc = st.checkbox("Azalan sırada", value=True)
+    if sort_by == "Best Score":
+        dfres = dfres.sort_values(by='best_score', ascending=not desc, na_position='last')
+    elif sort_by == "Strong Buy Count":
+        dfres = dfres.sort_values(by='strong_buy_count', ascending=not desc)
+    elif sort_by == "Buy Count":
+        dfres = dfres.sort_values(by='buy_count', ascending=not desc)
+    elif sort_by == "Sell Count":
+        dfres = dfres.sort_values(by='sell_count', ascending=not desc)
+    else:
+        dfres = dfres.sort_values(by='symbol', ascending=not desc)
+
+    max_show = st.number_input("Bir sayfada göster", min_value=10, max_value=min(500, len(dfres)), value=min(100, len(dfres)))
+    shown = dfres.head(int(max_show))
+
+    for idx, row in shown.iterrows():
+        cols = st.columns([2,1,1,3,1,1])
+        # logo
+        logo = get_coin_logo(row['symbol'])
+        if logo:
+            try:
+                r = requests.get(logo, timeout=2)
+                if r.status_code == 200:
+                    img = Image.open(BytesIO(r.content)); cols[0].image(img, width=32)
+            except Exception:
+                pass
+        cols[0].markdown(f"**{row['symbol']}**")
+        cols[1].markdown(f"**{row.get('best_timeframe','-') or '-'}**")
+        sc_val = row.get('best_score')
+        cols[2].markdown(f"<div class='score-big'>{safe_int_or_dash(sc_val)}</div>", unsafe_allow_html=True)
+        # per-TF labels
+        tf_lines = []
+        details = row.get('details') or {}
+        for tf in timeframes:
+            d = details.get(tf) if details else None
+            lbl = d.get('label') if d else "NO DATA"
+            tf_lines.append(f"`{tf}`: **{lbl}**")
+        cols[3].write("  \n".join(tf_lines))
+        cols[4].markdown(f"**SB: {safe_int_or_dash(row.get('strong_buy_count',0))}**")
+        btn = cols[5].button("Aç", key=f"open_{row['symbol']}")
+        if btn:
+            st.session_state.open_symbol = row['symbol']
+            st.session_state.open_details = details
+
+        # inline detail (only for selected)
+        if st.session_state.open_symbol == row['symbol']:
+            with st.container():
+                with st.expander(f"Detaylar — {row['symbol']}", expanded=True):
+                    details_local = st.session_state.open_details or details or {}
+                    for tf in timeframes:
+                        cell = details_local.get(tf) if details_local else None
+                        if not cell:
+                            st.write(f"**{tf}** — Veri yok veya yetersiz.")
+                            continue
+                        st.markdown(f"#### {tf} — {cell.get('label','-')} (Skor: {safe_int_or_dash(cell.get('score'))})")
+                        st.write(f"Fiyat: {cell.get('price','-')}")
+                        ps = pd.Series(cell.get('per_scores', {})).rename('points').to_frame()
+                        if not ps.empty:
+                            st.table(ps)
+                        else:
+                            st.write("Gösterge puanları yok.")
+                        per_scores = cell.get('per_scores', {})
+                        pos_sum = sum(v for v in per_scores.values() if v>0)
+                        neg_sum = sum(-v for v in per_scores.values() if v<0)
+                        net = pos_sum - neg_sum
+                        total_abs = pos_sum + neg_sum if (pos_sum+neg_sum)>0 else 1
+                        strength_pct = (net / total_abs) * 100
+                        direction = 'Bullish' if net>0 else ('Bearish' if net<0 else 'Neutral')
+                        st.markdown(f"**Direction:** **{direction}**  |  Strength: {strength_pct:.1f}%")
+                    sel_tf = row.get('best_timeframe') or (timeframes[0] if timeframes else '1h')
+                    interval_map = {'15m':'15','30m':'30','1h':'60','4h':'240','1d':'D'}
+                    tv_interval = interval_map.get(sel_tf, '60')
+                    tv_html = f"""
+                    <div class="tradingview-widget-container" style="height:480px; width:100%">
+                      <div id="tv_{row['symbol']}"></div>
+                      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+                      <script type="text/javascript">
+                      new TradingView.widget({{
+                        "container_id": "tv_{row['symbol']}",
+                        "symbol": "BINANCE:{row['symbol']}",
+                        "interval": "{tv_interval}",
+                        "timezone": "Europe/Istanbul",
+                        "theme": "dark",
+                        "style": "1",
+                        "locale": "tr",
+                        "toolbar_bg": "#0b0f14",
+                        "enable_publishing": false,
+                        "hide_legend": true
+                      }});
+                      </script>
+                    </div>
+                    """
+                    st.components.v1.html(tv_html, height=480)
+
+st.markdown("---")
+st.caption("Bu uygulama yatırım tavsiyesi değildir. Lütfen kendi risk yönetiminizi uygulayın.")
