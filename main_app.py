@@ -276,8 +276,13 @@ def run_scan(symbols, timeframes, weights, thresholds, top_n=100):
         results.append(entry)
     return pd.DataFrame(results)
 
-# ------------- YÜKLEDİĞİNİZ KODDAKİ HATALI FONKSİYON  ------------
+# ------------- YÜKLEDİĞİNİZ KODDAKİ HATALI FONKSİYON ("removeChild" HATASININ KAYNAĞI) ------------
 # def show_tradingview(symbol: str, interval_tv: str, height: int = 480):
+#     """
+#     Safe TradingView embed:
+#     - uses a persistent placeholder in session_state
+#     - constructs a unique container id per render to avoid DOM removeChild conflicts
+#     """
 #     ph_key = "tv_placeholder"
 #     if ph_key not in st.session_state:
 #         st.session_state[ph_key] = st.empty()
@@ -285,10 +290,10 @@ def run_scan(symbols, timeframes, weights, thresholds, top_n=100):
 #     uid = f"tv_{symbol.replace('/','_')}_{interval_tv}_{int(time.time()*1000)}"
 #     ...
 #     placeholder.html(tradingview_html, height=height)
-# -----------------------------------------------------------------------
+# --------------------------------------------------------------------------------
 
 
-# +++++++++++++ OLMASI GEREKEN, DÜZELTİLMİŞ FONKSİYON (HATA ÇÖZÜMÜ) +++++++++++++
+# +++++++++++++ OLMASI GEREKEN DÜZELTİLMİŞ FONKSİYON (HATA ÇÖZÜMÜ) +++++++++++++
 def show_tradingview(symbol: str, interval_tv: str, height: int = 480):
     """
     Güvenli TradingView yerleştirmesi (removeChild hatası çözümü):
