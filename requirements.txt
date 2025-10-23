@@ -6,4 +6,4 @@ python-binance
 requests
 pillow
 mplfinance
-
+plotly
