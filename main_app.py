@@ -1,7 +1,6 @@
 # main_app.py
 # Streamlit MEXC contract sinyal uygulaması - full, mobile-friendly, stable TradingView embed
 
-import time
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -9,6 +8,7 @@ import pandas_ta as ta
 import requests
 from datetime import datetime
 import ai_engine
+import streamlit.components.v1 as components # <-- ÇÖZÜM İÇİN EKLENDİ
 
 # optional plotly for indicator bars
 try:
@@ -276,52 +276,52 @@ def run_scan(symbols, timeframes, weights, thresholds, top_n=100):
         results.append(entry)
     return pd.DataFrame(results)
 
-# ------------- Safe TradingView embed helper (UPDATED) ------------
+# ------------- DÜZELTİLMİŞ TradingView embed helper (removeChild hatası çözümü) ------------
 def show_tradingview(symbol: str, interval_tv: str, height: int = 480):
     """
-    TradingView grafiğini güvenli biçimde embed eder.
-    removeChild / NotFoundError hatalarını önlemek için:
-    - Her render'da benzersiz key ve container_id kullanır.
-    - Streamlit DOM karışıklığını önler.
+    Güvenli TradingView yerleştirmesi (removeChild hatası çözümü):
+    - st.empty() ve session_state KULLANILMADAN, 
+    - st.components.v1.html kullanılarak izole bir iframe içinde yükler.
     """
-
-    # Benzersiz anahtar ve container id oluştur (ms bazlı zaman damgası)
-    uid = f"tv_{symbol.replace('/', '_')}_{interval_tv}_{int(time.time() * 1000)}"
-
-    # TradingView embed HTML (dark theme + responsive)
+    
+    # HTML/JS içeriğini bir string olarak hazırla
+    # Widget'ın içindeki container ID'si (uid) yeterlidir.
+    uid = f"tv_widget_{symbol.replace('/','_')}_{interval_tv}"
+    
     tradingview_html = f"""
-    <div class="tradingview-widget-container" style="width:100%;height:{height}px;">
-        <div id="{uid}"></div>
-        <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-        <script type="text/javascript">
-        (function(){{
-            try {{
-                new TradingView.widget({{
-                    "container_id": "{uid}",
-                    "symbol": "BINANCE:{symbol}",
-                    "interval": "{interval_tv}",
-                    "timezone": "Europe/Istanbul",
-                    "theme": "dark",
-                    "style": "1",
-                    "locale": "tr",
-                    "toolbar_bg": "#0b0f14",
-                    "enable_publishing": false,
-                    "allow_symbol_change": true,
-                    "hide_side_toolbar": false,
-                    "hideideas": true,
-                    "autosize": true
-                }});
-            }} catch(e) {{
-                var el = document.getElementById("{uid}");
-                if(el) el.innerHTML = "<div style='color:#f66;padding:10px;'>Grafik yüklenemedi: "+e.toString()+"</div>";
-            }}
-        }})();
-        </script>
+    <div class="tradingview-widget-container" style="height:{height}px; width:100%;">
+      <div id="{uid}" style="height:100%; width:100%;"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+      <script type="text/javascript">
+      (function() {{
+        try {{
+          new TradingView.widget({{
+            "container_id": "{uid}",
+            "symbol": "BINANCE:{symbol}",
+            "interval": "{interval_tv}",
+            "autosize": true,
+            "timezone": "Europe/Istanbul",
+            "theme": "dark",
+            "style": "1",
+            "locale": "tr",
+            "toolbar_bg": "#f1f3f6",
+            "enable_publishing": false,
+            "allow_symbol_change": true,
+            "hide_side_toolbar": false,
+            "hideideas": true
+          }});
+        }} catch(e) {{
+          var el = document.getElementById("{uid}");
+          if(el) el.innerHTML = "<div style='color:#f66;padding:10px;'>Grafik yüklenemedi: "+e.toString()+"</div>";
+        }}
+      }})(); 
+      </script>
     </div>
     """
-
-    # 🧠 Ana fark: key parametresi DOM karışmasını engeller
-    st.components.v1.html(tradingview_html, height=height, key=uid)
+    
+    # st.components.v1.html kullanarak HTML'i güvenle render et
+    # 'key' parametresi, Streamlit'in bileşeni tanımasını sağlar.
+    components.html(tradingview_html, height=height, scrolling=False)
 
 # ---------------- UI ----------------
 st.title("🔥 MEXC Vadeli — Profesyonel Sinyal Paneli (Full)")
