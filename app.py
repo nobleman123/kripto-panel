@@ -1,18 +1,20 @@
-# app.py  -- MEXC Futures (Contract) Streamlit scanner
+# app.py  (Güncellenmiş: slider-fix, candlestick, better scoring, NW-smoothing)
 import streamlit as st
 import pandas as pd
 import numpy as np
 import pandas_ta as ta
 import requests
+import plotly.graph_objects as go
+import plotly.express as px
 from datetime import datetime
 from io import BytesIO
 from PIL import Image
+import math
 
-st.set_page_config(page_title="MEXC Vadeli Sinyal Paneli", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="MEXC Vadeli Sinyal Paneli — Gelişmiş", layout="wide")
 
-# ----------------- CONFIG -----------------
+# ---------------- CONFIG ----------------
 CONTRACT_BASE = "https://contract.mexc.com/api/v1"
-# interval mapping user TF -> MEXC API interval
 INTERVAL_MAP = {
     '1m': 'Min1', '5m': 'Min5', '15m': 'Min15', '30m': 'Min30',
     '1h': 'Min60', '4h': 'Hour4', '8h': 'Hour8', '1d': 'Day1'
@@ -20,17 +22,13 @@ INTERVAL_MAP = {
 DEFAULT_TFS = ['15m', '1h', '4h']
 ALL_TFS = ['1m','5m','15m','30m','1h','4h','8h','1d']
 
-# ----------------- HELPERS -----------------
+# ---------------- HELPERS ----------------
 def mexc_symbol_from(symbol):
-    """Convert BTCUSDT -> BTC_USDT (MEXC contract format)."""
-    s = symbol.upper()
-    if '_' in s:
-        return s
-    # assume quote is USDT typically
+    s = symbol.strip().upper()
+    if '_' in s: return s
     if s.endswith('USDT'):
         return s[:-4] + "_USDT"
-    # fallback: insert underscore before last 4 chars
-    return s[:-4] + "_"+ s[-4:]
+    return s[:-4] + "_" + s[-4:]
 
 def safe_int_or_dash(v):
     if v is None: return '-'
@@ -39,79 +37,77 @@ def safe_int_or_dash(v):
     except:
         pass
     try:
-        return int(v)
+        return str(int(v))
     except:
         return '-'
 
-# ----------------- MEXC contract market functions -----------------
-def fetch_contract_ticker():
-    """Return list of contract tickers (market snapshot)."""
-    url = f"{CONTRACT_BASE}/contract/ticker"
-    r = requests.get(url, timeout=10)
+def fetch_json(url, params=None, timeout=10):
+    r = requests.get(url, params=params, timeout=timeout)
     r.raise_for_status()
-    j = r.json()
-    # docs: response { success:true, code:0, data: [ {symbol, lastPrice, volume24, ...}, ... ] }
+    return r.json()
+
+# ---------------- MEXC Contract endpoints ----------------
+def fetch_contract_ticker():
+    url = f"{CONTRACT_BASE}/contract/ticker"
+    j = fetch_json(url)
     return j.get('data', [])
 
 def get_top_contracts_by_volume(limit=100):
-    """Return top symbols by 24h volume (contract market)."""
     data = fetch_contract_ticker()
-    # some entries may have 'volume24' or 'amount24' depending on docs; try both
     def vol(x):
         return float(x.get('volume24') or x.get('amount24') or 0)
-    sorted_symbols = sorted(data, key=vol, reverse=True)
-    return [item.get('symbol') for item in sorted_symbols[:limit]]
+    items = sorted(data, key=vol, reverse=True)
+    return [it.get('symbol') for it in items[:limit]]
 
 def fetch_contract_klines(symbol_mexc, interval_mexc):
-    """
-    Get kline for contract symbol (MEXC format e.g. BTC_USDT).
-    Uses endpoint: GET /api/v1/contract/kline/{symbol}?interval=Min15
-    Returns DataFrame with columns timestamp, open, high, low, close, vol
-    """
     url = f"{CONTRACT_BASE}/contract/kline/{symbol_mexc}"
     params = {'interval': interval_mexc}
-    r = requests.get(url, params=params, timeout=12)
-    r.raise_for_status()
-    j = r.json()
-    # docs: j['data'] contains arrays: time, open, close, high, low, vol, amount
+    j = fetch_json(url, params=params)
     d = j.get('data') or {}
     times = d.get('time', [])
-    opens = d.get('open', [])
-    closes = d.get('close', [])
-    highs = d.get('high', [])
-    lows = d.get('low', [])
-    vols = d.get('vol', [])
     if not times:
         return pd.DataFrame()
     df = pd.DataFrame({
-        'timestamp': pd.to_datetime(times, unit='s'),
-        'open': opens,
-        'high': highs,
-        'low': lows,
-        'close': closes,
-        'volume': vols
+        'timestamp': pd.to_datetime(d.get('time'), unit='s'),
+        'open': d.get('open'),
+        'high': d.get('high'),
+        'low': d.get('low'),
+        'close': d.get('close'),
+        'volume': d.get('vol')
     })
     for c in ['open','high','low','close','volume']:
         df[c] = pd.to_numeric(df[c], errors='coerce')
     return df
 
 def fetch_contract_funding_rate(symbol_mexc):
-    """GET /api/v1/contract/funding_rate/{symbol}"""
     url = f"{CONTRACT_BASE}/contract/funding_rate/{symbol_mexc}"
-    r = requests.get(url, timeout=8)
-    r.raise_for_status()
-    j = r.json()
-    data = j.get('data') or {}
-    # sample keys: fundingRate, nextSettleTime
-    return {
-        'fundingRate': float(data.get('fundingRate') or 0),
-        'nextSettleTime': data.get('nextSettleTime')
-    }
+    try:
+        j = fetch_json(url)
+        data = j.get('data') or {}
+        return {'fundingRate': float(data.get('fundingRate') or 0)}
+    except Exception:
+        return {'fundingRate': 0.0}
 
-# ----------------- Indicators & scoring (reuse your previous logic, defensive) -----------------
+# ---------------- Indicators & Utilities ----------------
+def nw_smooth(series, bandwidth=8):
+    """Nadaraya-Watson kernel smoother — returns smoothed numpy array.
+       bandwidth ~ window size (small int)."""
+    y = np.asarray(series)
+    n = len(y)
+    if n == 0:
+        return np.array([])
+    sm = np.zeros(n)
+    for i in range(n):
+        distances = np.arange(n) - i
+        # use gaussian kernel with bandwidth
+        bw = max(1, bandwidth)
+        weights = np.exp(-0.5 * (distances / bw)**2)
+        sm[i] = np.sum(weights * y) / (np.sum(weights) + 1e-12)
+    return sm
+
 def compute_indicators(df):
     df = df.copy()
-    # short, defensive indicator set
+    # basic indicators defensive
     try:
         df['ema20'] = ta.ema(df['close'], length=20)
         df['ema50'] = ta.ema(df['close'], length=50)
@@ -129,7 +125,7 @@ def compute_indicators(df):
     try:
         df['rsi14'] = ta.rsi(df['close'], length=14)
     except Exception:
-        df['rsi14']=np.nan
+        df['rsi14'] = np.nan
     try:
         bb = ta.bbands(df['close'])
         if isinstance(bb, pd.DataFrame) and bb.shape[1] >= 3:
@@ -139,89 +135,196 @@ def compute_indicators(df):
     except Exception:
         df['bb_lower']=df['bb_mid']=df['bb_upper']=np.nan
     try:
-        df['adx14'] = ta.adx(df['high'], df['low'], df['close'])['ADX_14']
+        adx = ta.adx(df['high'], df['low'], df['close'])
+        df['adx14'] = adx['ADX_14'] if isinstance(adx, pd.DataFrame) and 'ADX_14' in adx.columns else np.nan
     except Exception:
         df['adx14'] = np.nan
+    try:
+        df['atr14'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+    except Exception:
+        df['atr14'] = np.nan
     try:
         df['vol_ma_short'] = ta.sma(df['volume'], length=20)
         df['vol_ma_long'] = ta.sma(df['volume'], length=50)
         df['vol_osc'] = (df['vol_ma_short'] - df['vol_ma_long']) / (df['vol_ma_long'] + 1e-9)
     except Exception:
         df['vol_osc'] = np.nan
-    # drop rows missing indicators
+
+    # Nadaraya-Watson smoothed close and slope
+    try:
+        sm = nw_smooth(df['close'].values, bandwidth=8)
+        if len(sm) == len(df):
+            df['nw_smooth'] = sm
+            df['nw_slope'] = pd.Series(sm).diff().fillna(0)
+        else:
+            df['nw_smooth'] = np.nan
+            df['nw_slope'] = np.nan
+    except Exception:
+        df['nw_smooth'] = np.nan
+        df['nw_slope'] = np.nan
+
     df = df.dropna()
     return df
 
+def normalize_by_volatility(value, latest_close, atr):
+    """Shrinks contribution if volatility (atr/price) is high — more conservative."""
+    try:
+        vol_ratio = (atr / (latest_close + 1e-9))
+        factor = 1.0 / (1.0 + vol_ratio * 5.0)   # configurable
+        return value * factor
+    except Exception:
+        return value
+
+# ---------------- Scoring (improved + explainable)
 def score_signals(latest, prev, funding, weights):
-    """Return total score (-100..100), per-indicator contributions, reasons list"""
+    """
+    Returns:
+      total_score (-100..100),
+      per_indicator dict {name: contribution},
+      reasons list strings
+    Approach:
+      - Each indicator produces a contribution in [-weight, +weight]
+      - Contributions are normalized by short-term volatility (ATR)
+      - Nadaraya-Watson slope acts as a momentum smoothing indicator
+      - fundingRate (>0 => shorts paying longs => slight bearish contrarian logic applied)
+    """
     per = {}
     reasons = []
     total = 0
-    # EMA alignment
+    atr = float(latest.get('atr14', np.nan) if not pd.isna(latest.get('atr14', np.nan)) else 0.0)
+    price = float(latest.get('close', np.nan) if not pd.isna(latest.get('close', np.nan)) else 0.0)
+
+    # EMA alignment: strong trend if ema20>ema50>ema200
     try:
+        w = weights.get('ema', 20)
+        contrib = 0
         if latest['ema20'] > latest['ema50'] > latest['ema200']:
-            per['ema'] = weights['ema']; total += per['ema']; reasons.append('EMA ↑')
+            contrib = +w
+            reasons.append("EMA alignment bullish")
         elif latest['ema20'] < latest['ema50'] < latest['ema200']:
-            per['ema'] = -weights['ema']; total += per['ema']; reasons.append('EMA ↓')
-        else:
-            per['ema'] = 0
+            contrib = -w
+            reasons.append("EMA alignment bearish")
+        per['ema'] = normalize_by_volatility(contrib, price, atr)
+        total += per['ema']
     except Exception:
         per['ema'] = 0
-    # MACD hist crossover
+
+    # MACD histogram crossover intensity (use magnitude change)
     try:
-        if prev.get('macd_hist', np.nan) < 0 and latest.get('macd_hist', np.nan) > 0:
-            per['macd'] = weights['macd']; total += per['macd']; reasons.append('MACD ↑')
-        elif prev.get('macd_hist', np.nan) > 0 and latest.get('macd_hist', np.nan) < 0:
-            per['macd'] = -weights['macd']; total += per['macd']; reasons.append('MACD ↓')
-        else:
-            per['macd'] = 0
+        w = weights.get('macd', 15)
+        p_h = float(prev.get('macd_hist', 0))
+        l_h = float(latest.get('macd_hist', 0))
+        contrib = 0
+        # bullish crossover
+        if p_h < 0 and l_h > 0:
+            # scale by how big the histogram turned positive
+            scale = min(abs(l_h) / (abs(p_h)+1e-9), 3.0)
+            contrib = w * scale
+            reasons.append("MACD crossover bullish")
+        elif p_h > 0 and l_h < 0:
+            scale = min(abs(l_h) / (abs(p_h)+1e-9), 3.0)
+            contrib = -w * scale
+            reasons.append("MACD crossover bearish")
+        per['macd'] = normalize_by_volatility(contrib, price, atr)
+        total += per['macd']
     except Exception:
         per['macd'] = 0
-    # RSI
+
+    # RSI: oversold/overbought with graduated contribution
     try:
-        if latest.get('rsi14', np.nan) < 30:
-            per['rsi'] = int(weights['rsi'] * 0.9); total += per['rsi']; reasons.append('RSI oversold')
-        elif latest.get('rsi14', np.nan) > 70:
-            per['rsi'] = -int(weights['rsi']*0.9); total += per['rsi']; reasons.append('RSI overbought')
+        w = weights.get('rsi', 12)
+        rsi = float(latest.get('rsi14', np.nan))
+        if rsi < 25:
+            contrib = w * (1 + (30 - rsi)/10)   # stronger if very low
+            reasons.append(f"RSI very low {rsi:.1f}")
+        elif rsi < 35:
+            contrib = w * 0.6; reasons.append(f"RSI low {rsi:.1f}")
+        elif rsi > 75:
+            contrib = -w * (1 + (rsi - 70)/10); reasons.append(f"RSI very high {rsi:.1f}")
+        elif rsi > 65:
+            contrib = -w * 0.6; reasons.append(f"RSI high {rsi:.1f}")
         else:
-            per['rsi'] = 0
+            contrib = 0
+        per['rsi'] = normalize_by_volatility(contrib, price, atr)
+        total += per['rsi']
     except Exception:
         per['rsi'] = 0
-    # Bollinger
+
+    # Bollinger position
     try:
-        if latest.get('bb_upper', np.nan) is not np.nan and latest['close'] > latest['bb_upper']:
-            per['bb'] = weights['bb']; total += per['bb']; reasons.append('BB upper')
-        elif latest.get('bb_lower', np.nan) is not np.nan and latest['close'] < latest['bb_lower']:
-            per['bb'] = -weights['bb']; total += per['bb']; reasons.append('BB lower')
+        w = weights.get('bb', 8)
+        if latest['close'] > latest['bb_upper']:
+            contrib = w; reasons.append("Price above BB upper")
+        elif latest['close'] < latest['bb_lower']:
+            contrib = -w; reasons.append("Price below BB lower")
         else:
-            per['bb'] = 0
+            contrib = 0
+        per['bb'] = normalize_by_volatility(contrib, price, atr)
+        total += per['bb']
     except Exception:
         per['bb'] = 0
-    # ADX
+
+    # ADX trend strength
     try:
-        per['adx'] = int(weights.get('adx',7) * 0.5) if latest.get('adx14',0) > 25 else 0
+        w = weights.get('adx', 6)
+        adx = float(latest.get('adx14', 0) if not pd.isna(latest.get('adx14', np.nan)) else 0)
+        if adx > 35:
+            contrib = w; reasons.append("ADX strong trend")
+        elif adx > 25:
+            contrib = int(w*0.6)
+        else:
+            contrib = 0
+        per['adx'] = contrib
         total += per['adx']
     except Exception:
         per['adx'] = 0
-    # Volume oscillator
+
+    # Volume oscillator spike
     try:
-        if latest.get('vol_osc',0) > 0.4:
-            per['vol'] = weights.get('vol',10); total += per['vol']; reasons.append('Vol spike')
-        elif latest.get('vol_osc',0) < -0.4:
-            per['vol'] = -weights.get('vol',10); total += per['vol']; reasons.append('Vol drop')
+        w = weights.get('vol', 6)
+        vol_osc = float(latest.get('vol_osc', 0))
+        if vol_osc > 0.5:
+            contrib = w; reasons.append("Volume spike")
+        elif vol_osc < -0.5:
+            contrib = -w; reasons.append("Volume drop")
         else:
-            per['vol'] = 0
+            contrib = 0
+        per['vol'] = normalize_by_volatility(contrib, price, atr)
+        total += per['vol']
     except Exception:
         per['vol'] = 0
-    # Funding (from MEXC funding endpoint)
+
+    # NW slope (smoothed momentum)
     try:
-        fr = funding.get('fundingRate', 0)
+        w = weights.get('nw', 8)
+        nw_s = float(latest.get('nw_slope', 0))
+        # normalized slope ratio relative to price
+        slope_pct = (nw_s / (price + 1e-9)) * 10000
+        if slope_pct > 0.1:
+            contrib = min(w * (slope_pct / 0.2), w*2)
+            reasons.append("NW slope positive")
+        elif slope_pct < -0.1:
+            contrib = -min(w * (abs(slope_pct) / 0.2), w*2)
+            reasons.append("NW slope negative")
+        else:
+            contrib = 0
+        per['nw_slope'] = normalize_by_volatility(contrib, price, atr)
+        total += per['nw_slope']
+    except Exception:
+        per['nw_slope'] = 0
+
+    # Funding rate contrarian interpretation
+    try:
+        w = weights.get('funding', 20)
+        fr = funding.get('fundingRate', 0.0)
+        # If funding positive (longs pay shorts) -> market crowded long -> slight contrarian negative
         if fr > 0.0006:
-            per['funding'] = -weights.get('funding', 30); total += per['funding']; reasons.append('Funding + -> bearish')
+            per['funding'] = -w; reasons.append(f"Funding positive {fr:.6f}")
         elif fr < -0.0006:
-            per['funding'] = weights.get('funding', 30); total += per['funding']; reasons.append('Funding - -> bullish')
+            per['funding'] = w; reasons.append(f"Funding negative {fr:.6f}")
         else:
             per['funding'] = 0
+        total += per['funding']
     except Exception:
         per['funding'] = 0
 
@@ -237,15 +340,14 @@ def label_from_score(score, thresholds):
     if score <= sell_t: return "SAT"
     return "TUT"
 
-# ----------------- SCAN (synchronous, defensive) -----------------
+# ---------------- SCAN engine (defensive) ----------------
 @st.cache_data(ttl=120)
 def run_scan(symbols, timeframes, weights, thresholds, top_n=100):
     results = []
-    # symbols are in user format like BTCUSDT or BTC_USDT; normalize to MEXC
     for sym in symbols[:top_n]:
         entry = {'symbol': sym, 'details': {}}
         best_score = None; best_tf = None
-        buy_count = strong_buy = sell_count = 0
+        buy_count = 0; strong_buy = 0; sell_count = 0
         mexc_sym = mexc_symbol_from(sym)
         for tf in timeframes:
             interval = INTERVAL_MAP.get(tf)
@@ -254,7 +356,7 @@ def run_scan(symbols, timeframes, weights, thresholds, top_n=100):
                 continue
             try:
                 df = fetch_contract_klines(mexc_sym, interval)
-                if df is None or df.empty or len(df) < 50:
+                if df is None or df.empty or len(df) < 30:
                     entry['details'][tf] = None
                     continue
                 df_ind = compute_indicators(df)
@@ -283,9 +385,9 @@ def run_scan(symbols, timeframes, weights, thresholds, top_n=100):
         results.append(entry)
     return pd.DataFrame(results)
 
-# ----------------- UI -----------------
-st.title("🔥 MEXC Vadeli (Contract) Sinyal Paneli")
-st.write("Not: MEXC contract API kullanılarak piyasa verileri çekiliyor (kline, funding, ticker gibi endpointler).")
+# ---------------- UI ----------------
+st.title("🔥 MEXC Vadeli (Contract) — Gelişmiş Sinyal Paneli")
+st.markdown("Bu versiyon: daha sağlam scoring (volatility-normalized), Nadaraya–Watson smoothing, candlestick grafiği ve gösterge katkı grafiği içerir.")
 
 # Sidebar controls
 st.sidebar.header("Tarama Ayarları")
@@ -293,21 +395,27 @@ mode = st.sidebar.selectbox("Sembol kaynağı", ["Top 50 by vol","Top 100 by vol
 if mode == "Custom list":
     custom = st.sidebar.text_area("Virgülle ayrılmış semboller (ör: BTCUSDT,ETHUSDT)", value="BTCUSDT,ETHUSDT")
     symbols = [s.strip().upper() for s in custom.split(',') if s.strip()]
-elif mode == "Top 50 by vol":
-    try:
-        top = get_top_contracts_by_volume(50)
-        symbols = [s.replace('_','') for s in top]  # keep user friendly BTCUSDT
-    except Exception:
-        symbols = ["BTCUSDT","ETHUSDT"]
 else:
     try:
-        top = get_top_contracts_by_volume(100)
+        if mode == "Top 50 by vol":
+            top = get_top_contracts_by_volume(50)
+        else:
+            top = get_top_contracts_by_volume(100)
+        # top are like "BTC_USDT" -> convert to BTCUSDT for display
         symbols = [s.replace('_','') for s in top]
     except Exception:
         symbols = ["BTCUSDT","ETHUSDT"]
 
+# safety: if custom list empty show message and stop
+if not symbols:
+    st.sidebar.error("Seçili sembol listesi boş. Lütfen 'Custom list' girin veya Top 50/100 seçin.")
+    st.stop()
+
 timeframes = st.sidebar.multiselect("Zaman dilimleri", options=ALL_TFS, default=DEFAULT_TFS)
-top_n = st.sidebar.slider("İlk N coin taransın", min_value=5, max_value=min(200,len(symbols)), value=min(50,len(symbols)))
+
+# safe slider bounds: at least 1
+max_possible = max(1, len(symbols))
+top_n = st.sidebar.slider("İlk N coin taransın", min_value=1, max_value=max_possible, value=min(50, max_possible))
 
 with st.sidebar.expander("Ağırlıklar (gelişmiş)"):
     w_ema = st.number_input("EMA", value=25)
@@ -317,7 +425,8 @@ with st.sidebar.expander("Ağırlıklar (gelişmiş)"):
     w_adx = st.number_input("ADX", value=7)
     w_vol = st.number_input("Volume", value=10)
     w_funding = st.number_input("Funding", value=30)
-weights = {'ema': w_ema, 'macd': w_macd, 'rsi': w_rsi, 'bb': w_bb, 'adx': w_adx, 'vol': w_vol, 'funding': w_funding}
+    w_nw = st.number_input("NW slope", value=8)
+weights = {'ema': w_ema, 'macd': w_macd, 'rsi': w_rsi, 'bb': w_bb, 'adx': w_adx, 'vol': w_vol, 'funding': w_funding, 'nw': w_nw}
 
 with st.sidebar.expander("Sinyal eşikleri"):
     strong_buy_t = st.slider("GÜÇLÜ AL ≥", 10, 100, 60)
@@ -328,11 +437,12 @@ thresholds = (strong_buy_t, buy_t, sell_t, strong_sell_t)
 
 scan = st.sidebar.button("🔍 Tara / Yenile")
 
-# session
 if 'scan_results' not in st.session_state: st.session_state.scan_results = pd.DataFrame()
 if 'open_symbol' not in st.session_state: st.session_state.open_symbol = None
+if 'open_details' not in st.session_state: st.session_state.open_details = None
+
 if scan:
-    with st.spinner("MEXC contract piyasası taranıyor..."):
+    with st.spinner("MEXC contract piyasası taranıyor... (biraz zaman alabilir)"):
         st.session_state.scan_results = run_scan(symbols, timeframes, weights, thresholds, top_n=top_n)
         st.session_state.last_scan = datetime.utcnow()
 
@@ -340,52 +450,90 @@ df = st.session_state.scan_results
 if df is None or df.empty:
     st.info("Henüz tarama yok veya sonuç boş. Yan panelden Tarayıcıyı çalıştırın.")
 else:
-    # small header
     st.write(f"Son tarama: {st.session_state.get('last_scan','-')}")
-    # simple table view
-    cols = st.columns([2,1,1,3,1,1])
-    cols[0].markdown("**Coin**"); cols[1].markdown("**Best TF**"); cols[2].markdown("**Skor**")
-    cols[3].markdown("**TF Etiketleri**"); cols[4].markdown("**SB**"); cols[5].markdown("**Aç**")
+    # header controls
+    sort_by = st.selectbox("Sırala", ["Best Score","Strong Buy Count","Buy Count","Sell Count","Symbol"])
+    desc = st.checkbox("Azalan sırada", value=True)
+    if sort_by == "Best Score":
+        df = df.sort_values(by='best_score', ascending=not desc, na_position='last')
+    elif sort_by == "Strong Buy Count":
+        df = df.sort_values(by='strong_buy_count', ascending=not desc)
+    elif sort_by == "Buy Count":
+        df = df.sort_values(by='buy_count', ascending=not desc)
+    elif sort_by == "Sell Count":
+        df = df.sort_values(by='sell_count', ascending=not desc)
+    else:
+        df = df.sort_values(by='symbol', ascending=not desc)
 
-    for _, row in df.iterrows():
-        c = st.columns([2,1,1,3,1,1])
-        c[0].markdown(f"**{row['symbol']}**")
-        c[1].markdown(f"{row.get('best_timeframe','-') or '-'}")
-        c[2].markdown(f"<b style='font-size:18px'>{safe_int_or_dash(row.get('best_score'))}</b>", unsafe_allow_html=True)
-        # tf labels compact
-        tf_lines = []
+    max_show = st.number_input("Bir sayfada göster", min_value=1, max_value=min(200, len(df)), value=min(50, len(df)))
+    shown = df.head(int(max_show))
+
+    # compact list with clear headings
+    header_cols = st.columns([2,1,1,3,1,1])
+    header_cols[0].markdown("**Coin**"); header_cols[1].markdown("**Best TF**"); header_cols[2].markdown("**Skor**")
+    header_cols[3].markdown("**TF Etiketleri**"); header_cols[4].markdown("**SB**"); header_cols[5].markdown("**Detay**")
+
+    for idx, row in shown.iterrows():
+        cols = st.columns([2,1,1,3,1,1])
+        cols[0].markdown(f"**{row['symbol']}**")
+        cols[1].markdown(f"{row.get('best_timeframe','-') or '-'}")
+        cols[2].markdown(f"<div style='font-weight:700; font-size:18px'>{safe_int_or_dash(row.get('best_score'))}</div>", unsafe_allow_html=True)
+        # per TF labels compact
+        labels = []
         dets = row.get('details') or {}
         for tf in timeframes:
             d = dets.get(tf) if dets else None
             lbl = d.get('label') if d else "NO DATA"
-            tf_lines.append(f"`{tf}`: **{lbl}**")
-        c[3].write("  \n".join(tf_lines))
-        c[4].markdown(f"**SB: {row.get('strong_buy_count',0)}**")
-        if c[5].button("Aç", key=f"open_{row['symbol']}"):
-            st.session_state.open_symbol = row['symbol']; st.session_state.open_details = dets
+            labels.append(f"`{tf}`: **{lbl}**")
+        cols[3].write("  \n".join(labels))
+        cols[4].markdown(f"**SB: {int(row.get('strong_buy_count',0))}**")
+        btn = cols[5].button("Aç", key=f"open_{row['symbol']}")
+        if btn:
+            st.session_state.open_symbol = row['symbol']
+            st.session_state.open_details = row.get('details', {})
 
         if st.session_state.open_symbol == row['symbol']:
+            # show details inline: candlestick + indicator bar chart + short reasons
             with st.expander(f"Detaylar — {row['symbol']}", expanded=True):
-                dets_local = st.session_state.open_details or {}
+                details_local = st.session_state.open_details or {}
+                # Choose best TF to show chart
+                best_tf = row.get('best_timeframe') or (timeframes[0] if timeframes else '15m')
+                mexc_sym = mexc_symbol_from(row['symbol'])
+                interval = INTERVAL_MAP.get(best_tf, 'Min15')
+                df_k = fetch_contract_klines(mexc_sym, interval)
+                if not df_k.empty:
+                    # candlestick plot using last 200 candles
+                    df_plot = df_k.tail(200).copy()
+                    fig = go.Figure(data=[go.Candlestick(x=df_plot['timestamp'],
+                                                        open=df_plot['open'], high=df_plot['high'],
+                                                        low=df_plot['low'], close=df_plot['close'])])
+                    fig.update_layout(margin=dict(l=10,r=10,t=20,b=10), height=420, template='plotly_dark')
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.write("Grafik için veri yok.")
+
+                # For each timeframe show small card with bar chart for per-indicator contributions
                 for tf in timeframes:
-                    cell = dets_local.get(tf) if dets_local else None
+                    cell = details_local.get(tf) if details_local else None
                     if not cell:
                         st.write(f"**{tf}** — Veri yok veya yetersiz.")
                         continue
-                    st.markdown(f"#### {tf} — {cell.get('label','-')} (Skor: {cell.get('score','-')})")
-                    st.write(f"Fiyat: {cell.get('price','-')}")
-                    ps = pd.Series(cell.get('per_scores', {})).rename('points').to_frame()
-                    if not ps.empty:
-                        st.table(ps)
-                    # direction
+                    st.markdown(f"### {tf} — {cell.get('label','-')}  |  Skor: {safe_int_or_dash(cell.get('score'))}")
+                    # reasons
+                    rs = cell.get('reasons', [])
+                    if rs:
+                        st.write("**Sinyal nedenleri:** " + "; ".join(rs))
                     per_scores = cell.get('per_scores', {})
-                    pos = sum(v for v in per_scores.values() if v>0)
-                    neg = sum(-v for v in per_scores.values() if v<0)
-                    net = pos - neg
-                    total_abs = pos + neg if (pos+neg)>0 else 1
-                    strength_pct = (net/total_abs)*100
-                    direction = 'Bullish' if net>0 else ('Bearish' if net<0 else 'Neutral')
-                    st.markdown(f"**Direction:** {direction} | Strength: {strength_pct:.1f}%")
+                    # bar chart of contributions
+                    if per_scores:
+                        df_per = pd.DataFrame([{'indicator':k,'points':v} for k,v in per_scores.items()])
+                        fig2 = px.bar(df_per, x='indicator', y='points', color='points', color_continuous_scale='RdYlGn', title=f"{tf} - Gösterge Katkıları")
+                        fig2.update_layout(height=260, margin=dict(l=10,r=10,t=30,b=10), template='plotly_dark')
+                        st.plotly_chart(fig2, use_container_width=True)
+                        # compact dataframe
+                        st.dataframe(df_per.set_index('indicator'), height=160)
+                    else:
+                        st.write("Gösterge katkı verisi yok.")
 
 st.markdown("---")
-st.caption("Bilgilendirme: Bu uygulama eğitim/deneme amaçlıdır. Yatırım tavsiyesi değildir.")
+st.caption("Bilgilendirme: Bu uygulama örnek/deneme amaçlıdır. Yatırım tavsiyesi değildir.")
