@@ -8,7 +8,7 @@ import pandas_ta as ta
 import requests
 from datetime import datetime
 import ai_engine
-import streamlit.components.v1 as components # <-- ÇÖZÜM İÇİN EKLENDİ
+import streamlit.components.v1 as components  # <-- HATA ÇÖZÜMÜ İÇİN EKLENDİ
 
 # optional plotly for indicator bars
 try:
@@ -284,8 +284,7 @@ def show_tradingview(symbol: str, interval_tv: str, height: int = 480):
     - st.components.v1.html kullanılarak izole bir iframe içinde yükler.
     """
     
-    # HTML/JS içeriğini bir string olarak hazırla
-    # Widget'ın içindeki container ID'si (uid) yeterlidir.
+    # Widget'ın içindeki div için benzersiz bir ID
     uid = f"tv_widget_{symbol.replace('/','_')}_{interval_tv}"
     
     tradingview_html = f"""
@@ -320,7 +319,7 @@ def show_tradingview(symbol: str, interval_tv: str, height: int = 480):
     """
     
     # st.components.v1.html kullanarak HTML'i güvenle render et
-    # 'key' parametresi, Streamlit'in bileşeni tanımasını sağlar.
+    # Bu, onu bir iframe'e koyar ve DOM çakışmalarını önler.
     components.html(tradingview_html, height=height, scrolling=False)
 
 # ---------------- UI ----------------
