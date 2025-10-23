@@ -276,48 +276,52 @@ def run_scan(symbols, timeframes, weights, thresholds, top_n=100):
         results.append(entry)
     return pd.DataFrame(results)
 
-# ------------- Safe TradingView embed helper (prevents removeChild errors) ------------
+# ------------- Safe TradingView embed helper (UPDATED) ------------
 def show_tradingview(symbol: str, interval_tv: str, height: int = 480):
     """
-    Safe TradingView embed:
-    - uses a persistent placeholder in session_state
-    - constructs a unique container id per render to avoid DOM removeChild conflicts
+    TradingView grafiğini güvenli biçimde embed eder.
+    removeChild / NotFoundError hatalarını önlemek için:
+    - Her render'da benzersiz key ve container_id kullanır.
+    - Streamlit DOM karışıklığını önler.
     """
-    ph_key = "tv_placeholder"
-    if ph_key not in st.session_state:
-        st.session_state[ph_key] = st.empty()
-    placeholder = st.session_state[ph_key]
-    uid = f"tv_{symbol.replace('/','_')}_{interval_tv}_{int(time.time()*1000)}"
+
+    # Benzersiz anahtar ve container id oluştur (ms bazlı zaman damgası)
+    uid = f"tv_{symbol.replace('/', '_')}_{interval_tv}_{int(time.time() * 1000)}"
+
+    # TradingView embed HTML (dark theme + responsive)
     tradingview_html = f"""
-    <div class="tradingview-widget-container">
-      <div id="{uid}"></div>
-      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-      <script type="text/javascript">
-      (function() {{
-        try {{
-          new TradingView.widget({{
-            "container_id": "{uid}",
-            "symbol": "BINANCE:{symbol}",
-            "interval": "{interval_tv}",
-            "timezone": "Europe/Istanbul",
-            "theme": "dark",
-            "style": "1",
-            "locale": "tr",
-            "toolbar_bg": "#f1f3f6",
-            "enable_publishing": false,
-            "allow_symbol_change": true,
-            "hide_side_toolbar": false,
-            "hideideas": true
-          }});
-        }} catch(e) {{
-          var el = document.getElementById("{uid}");
-          if(el) el.innerHTML = "<div style='color:#f66;padding:10px;'>Grafik yüklenemedi: "+e.toString()+"</div>";
-        }}
-      }})(); 
-      </script>
+    <div class="tradingview-widget-container" style="width:100%;height:{height}px;">
+        <div id="{uid}"></div>
+        <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+        <script type="text/javascript">
+        (function(){{
+            try {{
+                new TradingView.widget({{
+                    "container_id": "{uid}",
+                    "symbol": "BINANCE:{symbol}",
+                    "interval": "{interval_tv}",
+                    "timezone": "Europe/Istanbul",
+                    "theme": "dark",
+                    "style": "1",
+                    "locale": "tr",
+                    "toolbar_bg": "#0b0f14",
+                    "enable_publishing": false,
+                    "allow_symbol_change": true,
+                    "hide_side_toolbar": false,
+                    "hideideas": true,
+                    "autosize": true
+                }});
+            }} catch(e) {{
+                var el = document.getElementById("{uid}");
+                if(el) el.innerHTML = "<div style='color:#f66;padding:10px;'>Grafik yüklenemedi: "+e.toString()+"</div>";
+            }}
+        }})();
+        </script>
     </div>
     """
-    placeholder.html(tradingview_html, height=height)
+
+    # 🧠 Ana fark: key parametresi DOM karışmasını engeller
+    st.components.v1.html(tradingview_html, height=height, key=uid)
 
 # ---------------- UI ----------------
 st.title("🔥 MEXC Vadeli — Profesyonel Sinyal Paneli (Full)")
@@ -409,7 +413,7 @@ else:
             elif r['label']=='SAT' or r['label']=='GÜÇLÜ SAT': emoji='🔴'
             cols = st.columns([0.6,2,1])
             cols[0].markdown(f"<div style='font-size:20px'>{emoji}</div>", unsafe_allow_html=True)
-            cols[1].markdown(f"**{r['symbol']}**  •  {r['best_tf']}  \nSkor: {r['best_score']}  •  AI: {r['ai_prob']:.2f}")
+            cols[1].markdown(f"**{r['symbol']}** •  {r['best_tf']}  \nSkor: {r['best_score']}  •  AI: {r['ai_prob']:.2f}")
             if cols[2].button("Detay", key=f"det_{r['symbol']}"):
                 st.session_state.selected_symbol = r['symbol']
                 st.session_state.selected_tf = r['best_tf']
@@ -421,7 +425,7 @@ else:
         if sel is None:
             st.write("Listeden bir coin seçin.")
         else:
-            st.markdown(f"**{sel}**  •  TF: {sel_tf}")
+            st.markdown(f"**{sel}** •  TF: {sel_tf}")
             interval = TV_INTERVAL_MAP.get(sel_tf, '60')
             # safe TradingView embed
             show_tradingview(sel, interval, height=420)
