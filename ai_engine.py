@@ -1,12 +1,12 @@
 # ai_engine.py
-# Profesyonel Hibrit Analiz Motoru (Heuristic + Gemini AI)
+# Gelişmiş Hibrit AI Analiz Motoru - Specter Trend Cloud + Gemini AI
 
 import math
 import json
-from pathlib import Path
-from typing import Dict, Any
-import os
 import logging
+from pathlib import Path
+from typing import Dict, Any, Optional
+from datetime import datetime
 
 # Gemini AI kütüphanesini içe aktarmayı dene
 try:
@@ -14,239 +14,380 @@ try:
     GEMINI_AVAILABLE = True
 except ImportError:
     GEMINI_AVAILABLE = False
-    logging.warning("Gemini kütüphanesi yüklü değil. 'pip install google-generativeai' ile yükleyin. Yalnızca heuristic mod kullanılabilir.")
+    logging.warning("Gemini kütüphanesi yüklü değil. 'pip install google-generativeai' ile yükleyin.")
 
-RECORDS_FILE = Path("prediction_records.json")
+# Kayıt dosyası
+RECORDS_FILE = Path("ai_trading_records.json")
 
-def logistic(x):
-    try:
-        return 1.0 / (1.0 + math.exp(-x))
-    except OverflowError:
-        return 0.0 if x < 0 else 1.0
-
-def normalize(v, lo, hi):
-    if v is None: return 0.0
-    try: v = float(v)
-    except Exception: return 0.0
-    if hi == lo: return 0.0
-    return max(0.0, min(1.0, (v - lo) / (hi - lo)))
-
-def compute_trade_levels(price: float, atr: float, direction: str = 'LONG', risk_reward_ratio: float = 2.0, atr_multiplier: float = 1.5):
-    """Hem LONG hem SHORT yönler için giriş, stop ve hedef hesaplar."""
-    price = float(price)
-    atr = float(atr) if atr is not None and atr > 0 else price * 0.02 # ATR yoksa %2 varsay
-    
-    stop_distance = atr * atr_multiplier
-    target_distance = stop_distance * risk_reward_ratio
-    
-    if direction == 'LONG':
-        stop_loss = price - stop_distance
-        take_profit = price + target_distance
-    elif direction == 'SHORT':
-        stop_loss = price + stop_distance
-        take_profit = price - target_distance
-    else: # NEUTRAL
-        return {'entry': price, 'stop_loss': None, 'take_profit': None}
-
-    return {
-        'entry': price,
-        'stop_loss': max(0.0, stop_loss),
-        'take_profit': max(0.0, take_profit)
-    }
-
-def get_heuristic_analysis(indicators: Dict[str, Any]) -> Dict[str, Any]:
+class AdvancedAIEngine:
     """
-    Gelişmiş kural-bazlı (heuristic) analiz motoru.
-    İndikatör katkılarını puanlar ve bir sinyal üretir.
+    Gelişmiş Hibrit AI Analiz Motoru
+    Specter Trend Cloud + Gemini AI + Heuristic Kurallar
+    """
+    
+    def __init__(self):
+        self.risk_levels = {
+            "LOW": 0.3,
+            "MEDIUM": 0.5, 
+            "HIGH": 0.7,
+            "EXTREME": 1.0
+        }
+        
+    def calculate_combined_score(self, ai_analysis: Dict, specter_analysis: Dict) -> float:
+        """
+        AI ve Specter analizlerini birleştirerek kombine skor hesaplar
+        """
+        ai_confidence = ai_analysis.get('confidence', 0) / 100.0
+        ai_signal_strength = 1.0 if ai_analysis.get('signal') in ['LONG', 'SHORT'] else 0.3
+        
+        specter_strength = specter_analysis.get('trend_strength', 0)
+        specter_trend = 1.0 if specter_analysis.get('trend') in ['BULLISH', 'BEARISH'] else 0.5
+        
+        # Retest sinyalleri bonus
+        retest_bonus = 0
+        retest_signals = specter_analysis.get('retest_signals', [])
+        if retest_signals:
+            retest_bonus = 0.2
+        
+        # Kombine skor
+        combined = (
+            ai_confidence * 0.4 +
+            ai_signal_strength * 0.2 +
+            specter_strength * 0.3 +
+            retest_bonus * 0.1
+        )
+        
+        return min(combined * 100, 100)
+    
+    def analyze_risk_level(self, indicators: Dict, specter_data: Dict) -> str:
+        """
+        Piyasa risk seviyesini analiz eder
+        """
+        volatility = indicators.get('atr_percent', 2.0)
+        rsi = indicators.get('rsi', 50)
+        volume_ratio = indicators.get('volume_ratio', 1.0)
+        
+        risk_score = 0
+        
+        # Volatilite riski
+        if volatility > 8:
+            risk_score += 3
+        elif volatility > 5:
+            risk_score += 2
+        elif volatility > 3:
+            risk_score += 1
+            
+        # RSI riski
+        if rsi > 80 or rsi < 20:
+            risk_score += 2
+        elif rsi > 70 or rsi < 30:
+            risk_score += 1
+            
+        # Hacim riski
+        if volume_ratio > 3:
+            risk_score += 2
+        elif volume_ratio > 2:
+            risk_score += 1
+            
+        # Risk seviyesi belirle
+        if risk_score >= 5:
+            return "EXTREME"
+        elif risk_score >= 3:
+            return "HIGH" 
+        elif risk_score >= 2:
+            return "MEDIUM"
+        else:
+            return "LOW"
+    
+    def calculate_position_size(self, account_balance: float, risk_level: str, 
+                              stop_distance: float, price: float) -> Dict[str, float]:
+        """
+        Risk yönetimine göre pozisyon büyüklüğü hesaplar
+        """
+        risk_percentage = self.risk_levels.get(risk_level, 0.5)
+        max_risk_amount = account_balance * risk_percentage / 100
+        
+        if stop_distance <= 0:
+            return {'size': 0, 'risk_amount': 0}
+            
+        position_size = max_risk_amount / stop_distance
+        usdt_size = position_size * price
+        
+        return {
+            'size': position_size,
+            'usdt_size': usdt_size,
+            'risk_amount': max_risk_amount,
+            'risk_percentage': risk_percentage
+        }
+
+def get_heuristic_analysis(indicators: Dict, specter_data: Dict) -> Dict[str, Any]:
+    """
+    Gelişmiş kural-bazlı analiz motoru
     """
     long_score = 0
     short_score = 0
     explanation_points = []
     
-    # Ağırlıklar (Bu değerleri main_app'ten de alabilirsiniz, şimdilik burada sabit)
+    # Ağırlıklar
     weights = {
-        'rsi_extreme': 25,
-        'rsi_trend': 15,
-        'macd_cross': 30,
-        'macd_trend': 15,
-        'nw_slope': 30,
-        'vol_spike': 10,
-        'score_bonus': 20
+        'specter_trend': 30,
+        'rsi_extreme': 20,
+        'macd_signal': 25,
+        'momentum_alignment': 15,
+        'volume_confirmation': 10,
+        'risk_adjustment': 10
     }
-
-    # 1. RSI Analizi
-    rsi = indicators.get('rsi14', 50.0)
+    
+    # 1. Specter Trend Analizi
+    trend = specter_data.get('trend', 'NEUTRAL')
+    trend_strength = specter_data.get('trend_strength', 0)
+    
+    if trend == "BULLISH":
+        long_score += weights['specter_trend'] * trend_strength
+        explanation_points.append(f"📈 Specter BULLISH trend (Güç: {trend_strength:.1f}%)")
+    elif trend == "BEARISH":
+        short_score += weights['specter_trend'] * trend_strength
+        explanation_points.append(f"📉 Specter BEARISH trend (Güç: {trend_strength:.1f}%)")
+    
+    # 2. RSI Analizi
+    rsi = indicators.get('rsi', 50)
     if rsi < 30:
         long_score += weights['rsi_extreme']
-        explanation_points.append(f"RSI({rsi:.1f}) aşırı satım bölgesinde (+{weights['rsi_extreme']}p LONG).")
-    elif rsi < 45:
-        long_score += weights['rsi_trend']
-        explanation_points.append(f"RSI({rsi:.1f}) düşüş trendinde, ancak satıma yakın (+{weights['rsi_trend']}p LONG).")
+        explanation_points.append(f"🔻 RSI({rsi:.1f}) aşırı satım - ALIM sinyali")
     elif rsi > 70:
         short_score += weights['rsi_extreme']
-        explanation_points.append(f"RSI({rsi:.1f}) aşırı alım bölgesinde (+{weights['rsi_extreme']}p SHORT).")
-    elif rsi > 55:
-        short_score += weights['rsi_trend']
-        explanation_points.append(f"RSI({rsi:.1f}) yükseliş trendinde, ancak alıma yakın (+{weights['rsi_trend']}p SHORT).")
-
-    # 2. MACD Analizi
-    macd_hist = indicators.get('macd_hist', 0.0)
+        explanation_points.append(f"🔺 RSI({rsi:.1f}) aşırı alım - SATIM sinyali")
+    
+    # 3. MACD Analizi
+    macd_hist = indicators.get('macd_histogram', 0)
     if macd_hist > 0:
-        long_score += weights['macd_trend']
-        explanation_points.append(f"MACD Hist({macd_hist:.2f}) pozitif, bullish momentum (+{weights['macd_trend']}p LONG).")
+        long_score += weights['macd_signal']
+        explanation_points.append(f"🟢 MACD Histogram pozitif (+{macd_hist:.4f})")
     elif macd_hist < 0:
-        short_score += weights['macd_trend']
-        explanation_points.append(f"MACD Hist({macd_hist:.2f}) negatif, bearish momentum (+{weights['macd_trend']}p SHORT).")
-
-    # 3. NW Slope (Trend) Analizi
-    nw_slope = indicators.get('nw_slope', 0.0)
-    if nw_slope > 0:
-        long_score += weights['nw_slope']
-        explanation_points.append(f"Trend Eğimi({nw_slope:.2f}) pozitif, yükseliş trendi (+{weights['nw_slope']}p LONG).")
-    elif nw_slope < 0:
-        short_score += weights['nw_slope']
-        # --- BURASI DÜZELTİLDİ ---
-        explanation_points.append(f"Trend Eğimi({nw_slope:.2f}) negatif, düşüş trendi (+{weights['nw_slope']}p SHORT).")
-
-    # 4. Hacim Analizi
-    vol_osc = indicators.get('vol_osc', 0.0)
-    if vol_osc > 0.5:
-        # Yüksek hacim genelde mevcut trendi doğrular
-        if long_score > short_score: long_score += weights['vol_spike']
-        if short_score > long_score: short_score += weights['vol_spike']
-        explanation_points.append(f"Hacim Osilatörü({vol_osc:.2f}) yüksek, trendi doğruluyor (+{weights['vol_spike']}p).")
-
-    # 5. Ana Skor Bonusu (main_app'ten gelen skor)
-    score = indicators.get('score', 0)
-    if score > 40:
-        long_score += weights['score_bonus']
-        explanation_points.append(f"Genel Puan({score}) güçlü AL sinyali veriyor (+{weights['score_bonus']}p LONG).")
-    elif score < -40:
-        short_score += weights['score_bonus']
-        explanation_points.append(f"Genel Puan({score}) güçlü SAT sinyali veriyor (+{weights['score_bonus']}p SHORT).")
-
+        short_score += weights['macd_signal']
+        explanation_points.append(f"🔴 MACD Histogram negatif ({macd_hist:.4f})")
+    
+    # 4. Momentum Hizalama
+    price_momentum = indicators.get('momentum_5', 0)
+    if (trend == "BULLISH" and price_momentum > 0) or (trend == "BEARISH" and price_momentum < 0):
+        alignment_bonus = weights['momentum_alignment']
+        if trend == "BULLISH":
+            long_score += alignment_bonus
+        else:
+            short_score += alignment_bonus
+        explanation_points.append(f"⚡ Momentum trend ile uyumlu (%{price_momentum:.2f})")
+    
+    # 5. Hacim Onayı
+    volume_ratio = indicators.get('volume_ratio', 1.0)
+    if volume_ratio > 1.5:
+        volume_bonus = weights['volume_confirmation']
+        if long_score > short_score:
+            long_score += volume_bonus
+        elif short_score > long_score:
+            short_score += volume_bonus
+        explanation_points.append(f"📊 Yüksek hacim onayı (x{volume_ratio:.1f})")
+    
+    # 6. Retest Sinyalleri
+    retest_signals = specter_data.get('retest_signals', [])
+    for retest in retest_signals:
+        if 'BULLISH' in retest and trend == "BULLISH":
+            long_score += 15
+            explanation_points.append("🎯 Bullish Retest - Güçlü ALIM fırsatı")
+        elif 'BEARISH' in retest and trend == "BEARISH":
+            short_score += 15
+            explanation_points.append("🎯 Bearish Retest - Güçlü SATIM fırsatı")
+    
     # Sinyal Kararı
     signal = "NEUTRAL"
     confidence = 0
-    threshold = 20  # Sinyal üretmek için gereken minimum puan farkı
-
+    threshold = 25
+    
     if long_score > short_score + threshold:
         signal = "LONG"
-        confidence = int(normalize(long_score - short_score, threshold, 100) * 100)
+        confidence = int((long_score - short_score) / 100 * 100)
     elif short_score > long_score + threshold:
-        signal = "SHORT"
-        confidence = int(normalize(short_score - long_score, threshold, 100) * 100)
+        signal = "SHORT" 
+        confidence = int((short_score - long_score) / 100 * 100)
     else:
-        confidence = int(normalize(max(long_score, short_score), 0, threshold) * 50) # Düşük güvenli nötr
-
-    # Ticaret Seviyelerini Hesapla
-    levels = compute_trade_levels(
-        price=indicators.get('price'),
-        atr=indicators.get('atr14'),
-        direction=signal
-    )
+        confidence = int(max(long_score, short_score) / 2)
     
-    explanation = f"**Heuristic Sinyal: {signal} (Güven: {confidence}%)**\n"
-    explanation += f"LONG Puanı: {long_score} | SHORT Puanı: {short_score}\n"
-    explanation += "**Nedenler:**\n* " + "\n* ".join(explanation_points)
-
+    # Ticaret Seviyeleri
+    price = indicators.get('price', 0)
+    atr = indicators.get('atr', price * 0.02)
+    risk_level = "MEDIUM"
+    
+    levels = calculate_trade_levels(price, signal, atr, risk_level)
+    
+    explanation = f"**Heuristic Sinyal: {signal} (Güven: {confidence}%)**\n\n"
+    explanation += "**Analiz Detayları:**\n" + "\n".join([f"• {point}" for point in explanation_points])
+    
     return {
         "signal": signal,
         "confidence": confidence,
         "explanation": explanation,
-        **levels
+        "levels": levels,
+        "scores": {
+            "long_score": long_score,
+            "short_score": short_score
+        }
     }
 
-
-def get_gemini_analysis(indicators: Dict[str, Any], api_key: str) -> Dict[str, Any]:
+def get_gemini_analysis(indicators: Dict, specter_data: Dict, api_key: str) -> Dict[str, Any]:
     """
-    Gemini AI kullanarak gelişmiş teknik analiz yapar.
+    Gemini AI ile gelişmiş analiz
     """
     if not GEMINI_AVAILABLE:
-        raise ImportError("Gemini AI kütüphanesi (google-generativeai) yüklü değil.")
+        raise ImportError("Gemini AI kütüphanesi yüklü değil.")
         
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-pro')
     
-    # Gemini'ye gönderilecek ham veriler
-    data_context = json.dumps(indicators, indent=2)
+    # Analiz verilerini hazırla
+    analysis_context = {
+        "price_action": {
+            "current_price": indicators.get('price'),
+            "24h_high": indicators.get('high_24h'),
+            "24h_low": indicators.get('low_24h'),
+            "24h_change": indicators.get('price_change_24h')
+        },
+        "technical_indicators": {
+            "rsi": indicators.get('rsi'),
+            "macd": indicators.get('macd_histogram'),
+            "atr_percent": indicators.get('atr_percent'),
+            "bb_position": indicators.get('bb_position'),
+            "volume_ratio": indicators.get('volume_ratio')
+        },
+        "specter_analysis": {
+            "trend": specter_data.get('trend'),
+            "trend_strength": specter_data.get('trend_strength'),
+            "retest_signals": specter_data.get('retest_signals', []),
+            "momentum": specter_data.get('momentum')
+        }
+    }
     
     prompt = f"""
-    Sen usta bir kripto para vadeli işlem teknik analistisin.
-    Görevin, aşağıdaki JSON formatındaki indikatör anlık görüntüsünü analiz etmek ve profesyonel bir ticaret planı oluşturmaktır.
-
-    İNDİKATÖR VERİLERİ:
-    ```json
-    {data_context}
-    ```
-
-    İNDİKATÖR AÇIKLAMALARI:
-    - 'price': Mevcut Fiyat
-    - 'score': Diğer indikatörlerden gelen ön-hesaplanmış genel puan (-100 SAT, +100 AL)
-    - 'rsi14': RSI (14) değeri (30 altı aşırı satım, 70 üstü aşırı alım)
-    - 'macd_hist': MACD Histogram değeri (pozitif = bullish, negatif = bearish momentum)
-    - 'vol_osc': Hacim Osilatörü (pozitif değerler ortalamanın üstünde hacim artışı)
-    - 'atr14': ATR (14) - Volatilite göstergesi
-    - 'nw_slope': Nadaraya-Watson (Trend) Eğimi (pozitif = yükseliş, negatif = düşüş trendi)
-
+    SEN BİR USTA KRİPTO PARA VADELİ İŞLEM ANALİSTİSİN.
+    
+    GÖREVİN: Aşağıdaki teknik analiz verilerini kullanarak profesyonel bir ticaret planı oluşturmak.
+    
+    ANALİZ VERİLERİ:
+    {json.dumps(analysis_context, indent=2, ensure_ascii=False)}
+    
     TALEPLER:
-    1.  Verileri analiz ederek net bir SİNYAL belirle: "LONG", "SHORT" veya "NEUTRAL".
-    2.  Bu sinyale olan GÜVENİNİ 0 ile 100 arasında bir puanla belirt.
-    3.  Detaylı bir AÇIKLAMA yaz. Hangi indikatörlerin bu kararı en çok etkilediğini, piyasa duyarlılığının ne olduğunu (momentum, trend, volatilite) ve riskleri açıkla.
-    4.  'price' ve 'atr14' değerlerini kullanarak bu sinyal için profesyonel bir GİRİŞ (entry), STOP LOSS (stop_loss) ve HEDEF KÂR (take_profit) seviyesi belirle. (Risk/Ödül oranı yaklaşık 1:2 olmalı).
-
-    CEVAP FORMATI:
-    SADECE aşağıdaki yapıya sahip bir JSON nesnesi döndür:
+    1. Net bir ticaret sinyali belirle: "LONG", "SHORT" veya "NEUTRAL"
+    2. Bu sinyale olan güvenini 0-100 arasında puanla
+    3. Detaylı analiz açıklaması yaz (Türkçe)
+    4. Profesyonel ticaret seviyeleri belirle:
+       - Giriş (entry)
+       - Stop Loss (stop_loss) 
+       - Take Profit (take_profit)
+    5. Risk/Ödül oranı en az 1:2 olmalı
+    6. ATR ve volatilite verilerini dikkate al
+    
+    CEVAP FORMATI (SADECE JSON):
     {{
       "signal": "LONG",
       "confidence": 85,
-      "explanation": "Detaylı analiz...",
+      "explanation": "Detaylı analiz açıklaması...",
       "entry": 12345.67,
-      "stop_loss": 12300.00,
-      "take_profit": 12450.00
+      "stop_loss": 12200.50,
+      "take_profit": 12600.25
     }}
     """
     
     try:
         response = model.generate_content(prompt)
-        # Gemini'den gelen yanıtı temizle (bazen ```json ... ``` bloğu içinde dönebiliyor)
         cleaned_response = response.text.strip().replace("```json", "").replace("```", "").strip()
         
-        ai_plan = json.loads(cleaned_response)
+        ai_analysis = json.loads(cleaned_response)
         
-        # Gemini'nin açıklamasını formatla
-        ai_plan['explanation'] = f"**Gemini AI Sinyal: {ai_plan['signal']} (Güven: {ai_plan['confidence']}%)**\n{ai_plan['explanation']}"
+        # Açıklamayı formatla
+        ai_analysis['explanation'] = f"**🤖 Gemini AI Sinyal: {ai_analysis['signal']}**\n*Güven: {ai_analysis['confidence']}%*\n\n{ai_analysis['explanation']}"
         
-        return ai_plan
+        return ai_analysis
         
     except Exception as e:
-        # Hata durumunda, Gemini'den gelen tam yanıtı logla (eğer varsa)
-        raw_response_text = "Yanıt yok"
-        if 'response' in locals() and hasattr(response, 'text'):
-            raw_response_text = response.text
-        logging.error(f"Gemini API Hatası: {e}\nYanıt: {raw_response_text}")
-        raise ConnectionError(f"Gemini API ile iletişim kurulamadı veya yanıt ayrıştırılamadı. Hata: {e}")
+        logging.error(f"Gemini analiz hatası: {str(e)}")
+        raise
 
+def calculate_trade_levels(price: float, signal: str, atr: float, risk_level: str = "MEDIUM") -> Dict[str, float]:
+    """
+    Ticaret seviyelerini hesaplar
+    """
+    risk_multipliers = {
+        "LOW": 1.0,
+        "MEDIUM": 1.5,
+        "HIGH": 2.0,
+        "EXTREME": 2.5
+    }
+    
+    multiplier = risk_multipliers.get(risk_level, 1.5)
+    stop_distance = atr * multiplier
+    
+    if signal == "LONG":
+        return {
+            'entry': price,
+            'stop_loss': price - stop_distance,
+            'take_profit': price + (stop_distance * 2)  # 1:2 R/R
+        }
+    elif signal == "SHORT":
+        return {
+            'entry': price,
+            'stop_loss': price + stop_distance,
+            'take_profit': price - (stop_distance * 2)  # 1:2 R/R
+        }
+    else:
+        return {
+            'entry': price,
+            'stop_loss': 0,
+            'take_profit': 0
+        }
 
-def get_ai_prediction(indicators: Dict[str, Any], api_key: str = None) -> Dict[str, Any]:
+def get_ai_prediction(indicators: Dict, specter_data: Dict, api_key: str = None) -> Dict[str, Any]:
     """
-    Ana analiz fonksiyonu.
-    API anahtarı varsa Gemini'yi, yoksa heuristic motoru kullanır.
+    Ana AI tahmin fonksiyonu
     """
+    # Specter verisi yoksa heuristic kullan
+    if not specter_data:
+        return get_heuristic_analysis(indicators, {})
+    
+    # API anahtarı varsa Gemini'yi dene
     if api_key and GEMINI_AVAILABLE:
         try:
-            return get_gemini_analysis(indicators, api_key)
+            gemini_result = get_gemini_analysis(indicators, specter_data, api_key)
+            
+            # Gemini sonucunu heuristic ile doğrula
+            heuristic_result = get_heuristic_analysis(indicators, specter_data)
+            
+            # Sinyaller uyumluysa Gemini'yi kullan
+            if gemini_result.get('signal') == heuristic_result.get('signal'):
+                return gemini_result
+            else:
+                # Uyumsuzsa heuristic'i kullan ama Gemini'nin güven skorunu düşür
+                heuristic_result['confidence'] = max(
+                    heuristic_result['confidence'] - 20,
+                    heuristic_result['confidence'] * 0.7
+                )
+                heuristic_result['explanation'] += f"\n\n⚠️ *AI sinyalleri uyumsuz - Gemini: {gemini_result.get('signal')}*"
+                return heuristic_result
+                
         except Exception as e:
-            logging.warning(f"Gemini analizi başarısız oldu, heuristic moda geçiliyor: {e}")
-            # Gemini başarısız olursa heuristic'e geri dön
-            return get_heuristic_analysis(indicators)
+            logging.warning(f"Gemini başarısız, heuristic kullanılıyor: {str(e)}")
+            return get_heuristic_analysis(indicators, specter_data)
     else:
-        # API anahtarı yoksa veya kütüphane yüklü değilse
-        return get_heuristic_analysis(indicators)
+        # API yoksa heuristic kullan
+        return get_heuristic_analysis(indicators, specter_data)
 
-# --- Kayıt Fonksiyonları (Değişiklik Yok) ---
+def calculate_combined_score(ai_analysis: Dict, specter_analysis: Dict) -> float:
+    """
+    Kombine skor hesaplama yardımcı fonksiyonu
+    """
+    engine = AdvancedAIEngine()
+    return engine.calculate_combined_score(ai_analysis, specter_analysis)
 
-def load_records():
+# Kayıt yönetimi fonksiyonları
+def load_records() -> list:
+    """Kayıtlı ticaret verilerini yükle"""
     if not RECORDS_FILE.exists():
         return []
     try:
@@ -255,20 +396,33 @@ def load_records():
     except Exception:
         return []
 
-def save_record(record: Dict[str, Any]):
-    recs = load_records()
-    recs.append(record)
+def save_record(record: Dict[str, Any]) -> bool:
+    """Yeni ticaret kaydı ekle"""
+    records = load_records()
+    record['timestamp'] = datetime.utcnow().isoformat()
+    record['id'] = len(records) + 1
+    records.append(record)
+    
     try:
         with open(RECORDS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(recs, f, ensure_ascii=False, indent=2)
+            json.dump(records, f, ensure_ascii=False, indent=2)
         return True
     except Exception:
         return False
 
-def clear_records():
-    try:
-        if RECORDS_FILE.exists():
-            RECORDS_FILE.unlink()
-        return True
-    except Exception:
-        return False
+def get_performance_stats() -> Dict[str, Any]:
+    """Performans istatistiklerini hesapla"""
+    records = load_records()
+    if not records:
+        return {}
+    
+    successful_trades = [r for r in records if r.get('success', False)]
+    total_trades = len(records)
+    success_rate = len(successful_trades) / total_trades * 100 if total_trades > 0 else 0
+    
+    return {
+        'total_trades': total_trades,
+        'successful_trades': len(successful_trades),
+        'success_rate': success_rate,
+        'avg_confidence': sum(r.get('confidence', 0) for r in records) / total_trades if total_trades > 0 else 0
+    }
