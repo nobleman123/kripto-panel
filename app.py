@@ -1,5 +1,5 @@
 # app.py
-# Gelişmiş MEXC Vadeli Sinyal Uygulaması - Specter Trend Cloud & AI Hibrit Motor
+# Gelişmiş MEXC Vadeli Sinyal Uygulaması - Multi-Indicator AI System
 
 import streamlit as st
 import pandas as pd
@@ -8,15 +8,16 @@ import pandas_ta as ta
 import requests
 from datetime import datetime
 import ai_engine  # <-- Gelişmiş AI motorumuz
-import trend_cloud  # <-- Yeni Specter Trend Cloud indikatörü
+import technical_indicators  # <-- Yeni çoklu indikatör sistemi
 import streamlit.components.v1 as components
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import json
+import logging
 
 # Gelişmiş temalar ve görsel öğeler
 st.set_page_config(
-    page_title="MEXC Pro Sinyal Terminali", 
+    page_title="MEXC Pro AI Sinyal Terminali", 
     layout="wide", 
     initial_sidebar_state="collapsed",
     page_icon="🚀"
@@ -92,32 +93,22 @@ st.markdown("""
         font-size: 12px;
     }
     
-    /* Metrik kartlar */
-    .metric-card {
-        background: rgba(15, 23, 42, 0.6);
-        padding: 15px;
-        border-radius: 10px;
-        border: 1px solid rgba(255,255,255,0.05);
-        text-align: center;
-    }
-    
     /* Progress bar */
     .stProgress > div > div > div > div {
         background: linear-gradient(90deg, #ef4444 0%, #f59e0b 50%, #10b981 100%);
-    }
-    
-    /* Sidebar styling */
-    .css-1d391kg {
-        background: linear-gradient(180deg, #0f172a 0%, #0a0f1d 100%);
     }
 </style>
 """, unsafe_allow_html=True)
 
 # ---------------- API FONKSİYONLARI ----------------
 def fetch_json(url, params=None, timeout=10):
-    r = requests.get(url, params=params, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
+    try:
+        r = requests.get(url, params=params, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        logging.error(f"API hatası {url}: {str(e)}")
+        return {}
 
 def fetch_contract_ticker():
     url = f"{CONTRACT_BASE}/contract/ticker"
@@ -129,8 +120,12 @@ def fetch_contract_ticker():
 
 def get_top_contracts_by_volume(limit=200):
     data = fetch_contract_ticker()
+    if not data:
+        return ["BTCUSDT", "ETHUSDT", "ADAUSDT", "DOTUSDT", "LINKUSDT"]  # Fallback semboller
+    
     def vol(x):
         return float(x.get('volume24') or x.get('amount24') or 0)
+    
     items = sorted(data, key=vol, reverse=True)
     syms = [it.get('symbol') for it in items[:limit]]
     return [s.replace('_','') for s in syms if s]
@@ -149,6 +144,7 @@ def fetch_contract_klines(symbol_mexc, interval_mexc, limit=200):
         times = d.get('time', [])
         if not times:
             return pd.DataFrame()
+        
         df = pd.DataFrame({
             'timestamp': pd.to_datetime(d.get('time'), unit='s'),
             'open': d.get('open'),
@@ -157,10 +153,13 @@ def fetch_contract_klines(symbol_mexc, interval_mexc, limit=200):
             'close': d.get('close'),
             'volume': d.get('vol')
         })
+        
         for c in ['open','high','low','close','volume']:
             df[c] = pd.to_numeric(df[c], errors='coerce')
+        
         return df.dropna()
-    except Exception:
+    except Exception as e:
+        logging.error(f"Kline hatası {symbol_mexc}: {str(e)}")
         return pd.DataFrame()
 
 def fetch_contract_funding_rate(symbol_mexc):
@@ -172,56 +171,49 @@ def fetch_contract_funding_rate(symbol_mexc):
     except Exception:
         return {'fundingRate': 0.0}
 
-# ---------------- SPECTER TREND CLOUD ANALİZİ ----------------
-def analyze_with_specter_trend(df, symbol, timeframe):
-    """Specter Trend Cloud analizi yapar"""
-    if df.empty or len(df) < 50:
+# ---------------- GELİŞMİŞ TEKNİK ANALİZ ----------------
+def analyze_with_technical_indicators(df, symbol, timeframe):
+    """Çoklu teknik indikatör analizi yapar"""
+    if df.empty or len(df) < 100:  # Daha fazla veri gerekiyor
         return None
     
     try:
-        # Trend Cloud hesaplamaları
-        specter_data = trend_cloud.calculate_specter_cloud(df)
+        # Tüm teknik indikatörleri hesapla
+        indicator_data = technical_indicators.calculate_all_indicators(df)
         
-        if specter_data is None:
+        if indicator_data is None or indicator_data.empty:
             return None
             
         # Son sinyali al
-        latest = specter_data.iloc[-1]
-        prev = specter_data.iloc[-2] if len(specter_data) > 1 else latest
+        latest = indicator_data.iloc[-1]
         
         # Trend analizi
-        current_trend = "BULLISH" if latest['trend'] == 1 else "BEARISH"
-        trend_strength = abs(latest['momentum_strength'])
+        current_trend = "BULLISH" if latest['primary_trend'] == 1 else "BEARISH"
+        trend_strength = latest['trend_strength']
         
-        # Retest sinyalleri
-        retest_signals = []
-        if latest['bullish_retest']:
-            retest_signals.append("BULLISH_RETEST")
-        if latest['bearish_retest']:
-            retest_signals.append("BEARISH_RETEST")
-            
-        # Seviye analizi
-        levels = {
-            'current_price': latest['close'],
-            'cloud_top': latest['ma_upper'],
-            'cloud_bottom': latest['ma_lower'],
-            'short_ma': latest['ma_short'],
-            'long_ma': latest['ma_long']
-        }
+        # Sinyal gücü
+        signal_strength = latest['signal_strength']
+        
+        # Momentum analizi
+        momentum = latest['momentum_score']
+        
+        # Volatilite analizi
+        volatility = latest['volatility_state']
         
         return {
             'symbol': symbol,
             'timeframe': timeframe,
             'trend': current_trend,
             'trend_strength': trend_strength,
-            'retest_signals': retest_signals,
-            'levels': levels,
-            'momentum': latest['momentum_strength'],
-            'cloud_data': specter_data
+            'signal_strength': signal_strength,
+            'momentum': momentum,
+            'volatility': volatility,
+            'indicators': latest.to_dict(),
+            'indicator_data': indicator_data
         }
         
     except Exception as e:
-        st.error(f"Specter analiz hatası {symbol}: {str(e)}")
+        logging.error(f"Teknik analiz hatası {symbol}: {str(e)}")
         return None
 
 # ---------------- GELİŞMİŞ TARAMA MOTORU ----------------
@@ -239,7 +231,7 @@ def run_advanced_scan(symbols, timeframes, gemini_api_key, top_n=100):
         entry = {
             'symbol': sym, 
             'details': {},
-            'specter_analysis': {},
+            'technical_analysis': {},
             'ai_predictions': {}
         }
         
@@ -255,29 +247,40 @@ def run_advanced_scan(symbols, timeframes, gemini_api_key, top_n=100):
                 continue
                 
             # Kline verilerini al
-            df = fetch_contract_klines(mexc_sym, interval, limit=200)
-            if df.empty or len(df) < 50:
+            df = fetch_contract_klines(mexc_sym, interval, limit=300)  # Daha fazla veri
+            if df.empty or len(df) < 100:  # Minimum 100 bar
                 continue
             
-            # 1. Specter Trend Cloud Analizi
-            specter_analysis = analyze_with_specter_trend(df, sym, tf)
+            # 1. Teknik İndikatör Analizi
+            technical_analysis = analyze_with_technical_indicators(df, sym, tf)
             
+            if technical_analysis is None:
+                continue
+                
             # 2. AI Analizi için indikatör snapshot'ı oluştur
-            indicators_snapshot = trend_cloud.create_ai_snapshot(df, funding)
+            indicators_snapshot = technical_indicators.create_ai_snapshot(df, funding, technical_analysis)
             
             # 3. Gelişmiş AI Analizi
-            ai_analysis = ai_engine.get_ai_prediction(
-                indicators_snapshot, 
-                specter_analysis,
-                api_key=gemini_api_key
-            )
+            try:
+                ai_analysis = ai_engine.get_ai_prediction(
+                    indicators_snapshot, 
+                    technical_analysis,
+                    api_key=gemini_api_key
+                )
+            except Exception as e:
+                logging.error(f"AI analiz hatası {sym}: {str(e)}")
+                continue
             
             # 4. Kombine skor hesapla
-            combined_score = ai_engine.calculate_combined_score(ai_analysis, specter_analysis)
+            try:
+                combined_score = ai_engine.calculate_combined_score(ai_analysis, technical_analysis)
+            except Exception as e:
+                logging.error(f"Skor hesaplama hatası {sym}: {str(e)}")
+                combined_score = 50  # Varsayılan skor
             
             entry['details'][tf] = {
                 'price': float(df['close'].iloc[-1]),
-                'specter': specter_analysis,
+                'technical': technical_analysis,
                 'ai_analysis': ai_analysis,
                 'combined_score': combined_score,
                 'timestamp': datetime.utcnow().isoformat()
@@ -289,100 +292,99 @@ def run_advanced_scan(symbols, timeframes, gemini_api_key, top_n=100):
                 best_tf = tf
                 entry['best_analysis'] = {
                     'timeframe': tf,
-                    'specter': specter_analysis,
+                    'technical': technical_analysis,
                     'ai_analysis': ai_analysis,
                     'combined_score': combined_score
                 }
         
-        if entry['best_analysis']:
+        if entry.get('best_analysis'):
             results.append(entry)
     
     progress_bar.empty()
     status_text.empty()
     
-    return pd.DataFrame(results)
+    return pd.DataFrame(results) if results else pd.DataFrame()
 
 # ---------------- GELİŞMİŞ GÖRSELLEŞTİRME ----------------
-def create_specter_chart(df, specter_data, symbol, timeframe):
-    """Specter Trend Cloud grafiği oluşturur"""
+def create_technical_chart(df, indicator_data, symbol, timeframe):
+    """Teknik analiz grafiği oluşturur"""
     
-    fig = make_subplots(rows=2, cols=1, shared_x=True,
-                       vertical_spacing=0.05,
-                       subplot_titles=(f'{symbol} - {timeframe} Price Action with Specter Cloud', 
-                                     'Momentum Strength'),
-                       row_heights=[0.7, 0.3])
-    
-    # Candlestick
-    fig.add_trace(go.Candlestick(x=df['timestamp'],
-                                open=df['open'],
-                                high=df['high'],
-                                low=df['low'],
-                                close=df['close'],
-                                name='Price'),
-                 row=1, col=1)
-    
-    # Specter Cloud
-    fig.add_trace(go.Scatter(x=specter_data['timestamp'],
-                            y=specter_data['ma_upper'],
-                            line=dict(color='rgba(0,0,0,0)'),
-                            showlegend=False,
-                            name='Cloud Upper'),
-                 row=1, col=1)
-    
-    fig.add_trace(go.Scatter(x=specter_data['timestamp'],
-                            y=specter_data['ma_lower'],
-                            line=dict(color='rgba(0,0,0,0)'),
-                            fill='tonexty',
-                            fillcolor='rgba(0, 255, 255, 0.2)' if specter_data['trend'].iloc[-1] == 1 else 'rgba(255, 165, 0, 0.2)',
-                            name='Trend Cloud'),
-                 row=1, col=1)
-    
-    # Moving averages
-    fig.add_trace(go.Scatter(x=specter_data['timestamp'],
-                            y=specter_data['ma_short'],
-                            line=dict(color='#3B82F6', width=2),
-                            name='Short MA'),
-                 row=1, col=1)
-    
-    fig.add_trace(go.Scatter(x=specter_data['timestamp'],
-                            y=specter_data['ma_long'],
-                            line=dict(color='#EF4444', width=2),
-                            name='Long MA'),
-                 row=1, col=1)
-    
-    # Retest markers
-    bullish_retests = specter_data[specter_data['bullish_retest'] == True]
-    bearish_retests = specter_data[specter_data['bearish_retest'] == True]
-    
-    if not bullish_retests.empty:
-        fig.add_trace(go.Scatter(x=bullish_retests['timestamp'],
-                                y=bullish_retests['low'] * 0.998,
-                                mode='markers',
-                                marker=dict(symbol='diamond', size=10, color='#10B981'),
-                                name='Bullish Retest'),
+    try:
+        fig = make_subplots(rows=3, cols=1, shared_x=True,
+                           vertical_spacing=0.05,
+                           subplot_titles=(f'{symbol} - {timeframe} Price & Indicators', 
+                                         'Momentum Indicators',
+                                         'Volume & Oscillators'),
+                           row_heights=[0.5, 0.25, 0.25])
+        
+        # Candlestick
+        fig.add_trace(go.Candlestick(x=df['timestamp'],
+                                    open=df['open'],
+                                    high=df['high'],
+                                    low=df['low'],
+                                    close=df['close'],
+                                    name='Price'),
                      row=1, col=1)
-    
-    if not bearish_retests.empty:
-        fig.add_trace(go.Scatter(x=bearish_retests['timestamp'],
-                                y=bearish_retests['high'] * 1.002,
-                                mode='markers',
-                                marker=dict(symbol='diamond', size=10, color='#EF4444'),
-                                name='Bearish Retest'),
-                     row=1, col=1)
-    
-    # Momentum
-    fig.add_trace(go.Scatter(x=specter_data['timestamp'],
-                            y=specter_data['momentum_strength'],
-                            line=dict(color='#8B5CF6', width=2),
-                            name='Momentum'),
-                 row=2, col=1)
-    
-    fig.update_layout(height=600, 
-                     template='plotly_dark',
-                     showlegend=True,
-                     xaxis_rangeslider_visible=False)
-    
-    return fig
+        
+        # Moving averages
+        if 'ema_20' in indicator_data.columns:
+            fig.add_trace(go.Scatter(x=indicator_data['timestamp'],
+                                    y=indicator_data['ema_20'],
+                                    line=dict(color='#3B82F6', width=1),
+                                    name='EMA 20'),
+                         row=1, col=1)
+        
+        if 'ema_50' in indicator_data.columns:
+            fig.add_trace(go.Scatter(x=indicator_data['timestamp'],
+                                    y=indicator_data['ema_50'],
+                                    line=dict(color='#EF4444', width=1),
+                                    name='EMA 50'),
+                         row=1, col=1)
+        
+        if 'ema_200' in indicator_data.columns:
+            fig.add_trace(go.Scatter(x=indicator_data['timestamp'],
+                                    y=indicator_data['ema_200'],
+                                    line=dict(color='#8B5CF6', width=2),
+                                    name='EMA 200'),
+                         row=1, col=1)
+        
+        # RSI
+        if 'rsi' in indicator_data.columns:
+            fig.add_trace(go.Scatter(x=indicator_data['timestamp'],
+                                    y=indicator_data['rsi'],
+                                    line=dict(color='#F59E0B', width=2),
+                                    name='RSI'),
+                         row=2, col=1)
+            
+            # RSI seviyeleri
+            fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
+            fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+            fig.add_hline(y=50, line_dash="dot", line_color="gray", row=2, col=1)
+        
+        # MACD
+        if 'macd' in indicator_data.columns and 'macd_signal' in indicator_data.columns:
+            fig.add_trace(go.Scatter(x=indicator_data['timestamp'],
+                                    y=indicator_data['macd'],
+                                    line=dict(color='#10B981', width=2),
+                                    name='MACD'),
+                         row=3, col=1)
+            
+            fig.add_trace(go.Scatter(x=indicator_data['timestamp'],
+                                    y=indicator_data['macd_signal'],
+                                    line=dict(color='#EF4444', width=2),
+                                    name='MACD Signal'),
+                         row=3, col=1)
+        
+        fig.update_layout(height=800, 
+                         template='plotly_dark',
+                         showlegend=True,
+                         xaxis_rangeslider_visible=False)
+        
+        return fig
+        
+    except Exception as e:
+        logging.error(f"Grafik oluşturma hatası: {str(e)}")
+        return None
 
 # ---------------- ANA UYGULAMA ----------------
 def main():
@@ -391,8 +393,8 @@ def main():
     with col2:
         st.markdown("""
         <div class='header-card'>
-            <h1 style='text-align: center; margin: 0; color: white;'>🚀 MEXC PRO SINYAL TERMİNALİ</h1>
-            <p style='text-align: center; margin: 5px 0 0 0; color: #cbd5e1;'>Specter Trend Cloud & AI Hibrit Analiz Sistemi</p>
+            <h1 style='text-align: center; margin: 0; color: white;'>🚀 MEXC PRO AI SINYAL TERMİNALİ</h1>
+            <p style='text-align: center; margin: 5px 0 0 0; color: #cbd5e1;'>Çoklu İndikatör & Derin Öğrenme AI Sistemi</p>
         </div>
         """, unsafe_allow_html=True)
     
@@ -415,7 +417,7 @@ def main():
     if mode == "Custom list":
         custom = st.sidebar.text_area(
             "📝 Özel Sembol Listesi", 
-            value="BTCUSDT,ETHUSDT,ADAUSDT",
+            value="BTCUSDT,ETHUSDT,ADAUSDT,SOLUSDT,AVAXUSDT",
             help="Virgülle ayırarak sembolleri girin"
         )
         symbols = [s.strip().upper() for s in custom.split(',') if s.strip()]
@@ -436,15 +438,18 @@ def main():
     top_n = st.sidebar.slider(
         "🔢 İlk N Coin Taransın", 
         min_value=5, 
-        max_value=min(100, len(symbols)), 
-        value=min(30, len(symbols))
+        max_value=min(50, len(symbols)), 
+        value=min(25, len(symbols))
     )
     
-    # Specter ayarları
-    with st.sidebar.expander("⚡ Specter Trend Cloud Ayarları"):
-        ma_type = st.selectbox("MA Tipi", ["SMA", "EMA", "WMA", "DEMA"], index=1)
-        base_length = st.slider("Temel Uzunluk", 5, 50, 20)
-        atr_multiplier = st.slider("ATR Çarpanı", 0.5, 3.0, 1.5)
+    # İndikatör ayarları
+    with st.sidebar.expander("📈 İndikatör Ayarları"):
+        st.checkbox("EMA Dizilimi", value=True)
+        st.checkbox("MACD Sinyali", value=True)
+        st.checkbox("RSI Extremum", value=True)
+        st.checkbox("Bollinger Bantları", value=True)
+        st.checkbox("Volume Analizi", value=True)
+        st.checkbox("Momentum İndikatörleri", value=True)
     
     # Tarama butonu
     scan_clicked = st.sidebar.button(
@@ -453,27 +458,23 @@ def main():
         use_container_width=True
     )
     
-    # Otomatik yenileme
-    auto_refresh = st.sidebar.checkbox("🔄 Otomatik Yenileme (120sn)", value=False)
-    
     # Session state yönetimi
     if 'scan_results' not in st.session_state:
         st.session_state.scan_results = pd.DataFrame()
     if 'selected_symbol' not in st.session_state:
         st.session_state.selected_symbol = None
-    if 'last_scan' not in st.session_state:
-        st.session_state.last_scan = None
     
     # Tarama işlemi
-    if scan_clicked or (auto_refresh and st.session_state.last_scan and 
-                       (datetime.utcnow() - st.session_state.last_scan).seconds > 120):
-        
-        with st.spinner("🚀 Gelişmiş tarama çalışıyor... Specter Cloud ve AI analizleri yapılıyor"):
-            st.session_state.scan_results = run_advanced_scan(
-                symbols, timeframes, gemini_api_key, top_n
-            )
-            st.session_state.last_scan = datetime.utcnow()
-            st.rerun()
+    if scan_clicked:
+        with st.spinner("🚀 Gelişmiş tarama çalışıyor... Çoklu indikatör ve AI analizleri yapılıyor"):
+            try:
+                st.session_state.scan_results = run_advanced_scan(
+                    symbols, timeframes, gemini_api_key, top_n
+                )
+                st.session_state.last_scan = datetime.utcnow()
+                st.rerun()
+            except Exception as e:
+                st.error(f"Tarama hatası: {str(e)}")
     
     # Sonuçları göster
     df = st.session_state.scan_results
@@ -482,14 +483,14 @@ def main():
         st.info("""
         ## 📋 Başlarken
         
-        **MEXC Pro Sinyal Terminali'ne hoş geldiniz!**
+        **MEXC Pro AI Sinyal Terminali'ne hoş geldiniz!**
         
         🎯 **Özellikler:**
-        - 🤖 **Gelişmiş AI Analiz** - Gemini AI entegrasyonu
-        - ☁️ **Specter Trend Cloud** - Profesyonel trend takip sistemi
-        - 📊 **Çoklu Zaman Dilimi** - 1m'den 1güne kadar analiz
+        - 🤖 **Gelişmiş AI Analiz** - Gemini AI + Çoklu İndikatör
+        - 📊 **20+ Teknik İndikatör** - Kapsamlı teknik analiz
         - ⚡ **Gerçek Zamanlı Sinyaller** - Anlık al/sat önerileri
-        - 🎨 **Gelişmiş Görselleştirme** - Interaktif grafikler
+        - 🎨 **Interaktif Grafikler** - Profesyonel görselleştirme
+        - 📈 **Risk Yönetimi** - Akıllı pozisyon hesaplama
         
         **Başlamak için sol menüden ayarları yapıp 'Gelişmiş Tarama Başlat' butonuna tıklayın.**
         """)
@@ -507,18 +508,15 @@ def display_ai_signals(df):
     st.markdown("### 🔥 AI Sinyal Listesi")
     
     # Filtreler
-    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+    col1, col2, col3 = st.columns([2, 1, 1])
     
     with col1:
         filter_signal = st.selectbox("Sinyal Türü", ["Tümü", "LONG", "SHORT", "NEUTRAL"])
     
     with col2:
-        min_confidence = st.slider("Min Güven", 0, 100, 70)
+        min_confidence = st.slider("Min Güven %", 0, 100, 70)
     
     with col3:
-        min_strength = st.slider("Min Trend Gücü", 0, 100, 50)
-    
-    with col4:
         sort_by = st.selectbox("Sırala", ["Güven", "Trend Gücü", "Kombine Skor"])
     
     # Sinyal kartları
@@ -529,14 +527,14 @@ def display_ai_signals(df):
             
         analysis = row['best_analysis']
         ai_analysis = analysis.get('ai_analysis', {})
-        specter = analysis.get('specter', {})
+        technical = analysis.get('technical', {})
         
         signal_info = {
             'symbol': row['symbol'],
             'timeframe': analysis['timeframe'],
             'signal': ai_analysis.get('signal', 'NEUTRAL'),
             'confidence': ai_analysis.get('confidence', 0),
-            'trend_strength': specter.get('trend_strength', 0) * 100,
+            'trend_strength': technical.get('trend_strength', 0) * 100,
             'combined_score': analysis.get('combined_score', 0),
             'price': analysis.get('ai_analysis', {}).get('entry', 0),
             'explanation': ai_analysis.get('explanation', ''),
@@ -561,7 +559,7 @@ def display_ai_signals(df):
     
     # Sinyal kartlarını göster
     cols = st.columns(3)
-    for idx, signal in enumerate(filtered_signals[:12]):  # Max 12 sinyal
+    for idx, signal in enumerate(filtered_signals[:12]):
         with cols[idx % 3]:
             display_signal_card(signal, idx)
 
@@ -617,9 +615,10 @@ def display_selected_symbol_details(df, api_key):
         return
     
     # Sembol seçicisi
-    col1, col2, col3 = st.columns([2, 1, 1])
+    col1, col2 = st.columns([2, 1])
     with col1:
-        selected_symbol = st.selectbox("Sembol Seçin:", symbols, index=symbols.index(selected_symbol) if selected_symbol in symbols else 0)
+        selected_symbol = st.selectbox("Sembol Seçin:", symbols, 
+                                     index=symbols.index(selected_symbol) if selected_symbol in symbols else 0)
     
     # Seçili sembolün verilerini al
     symbol_data = next((row for _, row in df.iterrows() if row['symbol'] == selected_symbol), None)
@@ -629,7 +628,7 @@ def display_selected_symbol_details(df, api_key):
     
     analysis = symbol_data['best_analysis']
     ai_analysis = analysis.get('ai_analysis', {})
-    specter = analysis.get('specter', {})
+    technical = analysis.get('technical', {})
     
     # Ana metrikler
     col1, col2, col3, col4 = st.columns(4)
@@ -639,8 +638,8 @@ def display_selected_symbol_details(df, api_key):
                  f"%{ai_analysis.get('confidence', 0)} Güven")
     
     with col2:
-        st.metric("☁️ Trend", specter.get('trend', 'N/A'),
-                 f"%{specter.get('trend_strength', 0) * 100:.0f} Güç")
+        st.metric("📊 Trend", technical.get('trend', 'N/A'),
+                 f"%{technical.get('trend_strength', 0) * 100:.0f} Güç")
     
     with col3:
         current_price = ai_analysis.get('entry', 0)
@@ -653,15 +652,18 @@ def display_selected_symbol_details(df, api_key):
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        # Specter Trend Cloud Grafiği
-        if specter.get('cloud_data') is not None:
-            fig = create_specter_chart(
-                specter['cloud_data'], 
-                specter['cloud_data'],
+        # Teknik Analiz Grafiği
+        if technical.get('indicator_data') is not None:
+            fig = create_technical_chart(
+                technical['indicator_data'], 
+                technical['indicator_data'],
                 selected_symbol, 
                 analysis['timeframe']
             )
-            st.plotly_chart(fig, use_container_width=True)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("📊 Grafik oluşturulamadı")
         else:
             st.warning("📊 Grafik verisi mevcut değil")
     
@@ -691,41 +693,13 @@ def display_selected_symbol_details(df, api_key):
         st.markdown("#### 🤖 AI Analizi")
         explanation = ai_analysis.get('explanation', 'Açıklama mevcut değil.')
         st.write(explanation)
-        
-        # Retest sinyalleri
-        if specter.get('retest_signals'):
-            st.markdown("#### 📍 Retest Sinyalleri")
-            for retest in specter['retest_signals']:
-                if 'BULLISH' in retest:
-                    st.success("🟢 Bullish Retest - ALIM fırsatı")
-                elif 'BEARISH' in retest:
-                    st.error("🔴 Bearish Retest - SATIM fırsatı")
     
-    # Ek bilgiler
+    # Detaylı İndikatör Tablosu
     with st.expander("📋 Detaylı İndikatör Verileri"):
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("##### Specter Trend Cloud")
-            if specter:
-                st.json({
-                    'Trend': specter.get('trend'),
-                    'Trend Gücü': f"{specter.get('trend_strength', 0) * 100:.1f}%",
-                    'Momentum': f"{specter.get('momentum', 0):.2f}",
-                    'Retest Sinyalleri': specter.get('retest_signals', [])
-                })
-        
-        with col2:
-            st.markdown("##### Seviye Analizi")
-            if specter.get('levels'):
-                levels = specter['levels']
-                st.json({
-                    'Mevcut Fiyat': f"${levels.get('current_price', 0):.4f}",
-                    'Cloud Üstü': f"${levels.get('cloud_top', 0):.4f}",
-                    'Cloud Altı': f"${levels.get('cloud_bottom', 0):.4f}",
-                    'Kısa MA': f"${levels.get('short_ma', 0):.4f}",
-                    'Uzun MA': f"${levels.get('long_ma', 0):.4f}"
-                })
+        if technical.get('indicators'):
+            indicators_df = pd.DataFrame([technical['indicators']]).T
+            indicators_df.columns = ['Değer']
+            st.dataframe(indicators_df, use_container_width=True)
 
 def calculate_profit_potential(entry, stop_loss, take_profit):
     """Potansiyel kazanç hesaplama"""
