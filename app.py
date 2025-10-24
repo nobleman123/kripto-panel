@@ -1,636 +1,735 @@
 # app.py
-# Gelişmiş MEXC Vadeli Sinyal Uygulaması - Multi-Indicator AI System
+# MEXC Pro AI Trading Terminal - Premium Sinyal Sistemi
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import pandas_ta as ta
 import requests
-from datetime import datetime
-import ai_engine  # <-- Gelişmiş AI motorumuz
-import technical_indicators  # <-- Yeni çoklu indikatör sistemi
+from datetime import datetime, timedelta
+import ai_engine
+import technical_indicators
+import market_analysis
 import streamlit.components.v1 as components
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import json
 import logging
+from typing import Dict, Any, List
+import hashlib
+import hmac
+
+# Logging configuration
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Gelişmiş temalar ve görsel öğeler
 st.set_page_config(
-    page_title="MEXC Pro AI Sinyal Terminali", 
+    page_title="MEXC PRO AI TRADER", 
     layout="wide", 
     initial_sidebar_state="collapsed",
     page_icon="🚀"
 )
 
-# ---------------- CONFIG & STYLING ----------------
+# ---------------- GELİŞMİŞ STYLING ----------------
+st.markdown("""
+<style>
+    /* Premium Dark Theme */
+    .main {
+        background: linear-gradient(135deg, #0a0f1d 0%, #071018 50%, #050a14 100%);
+        color: #ffffff;
+    }
+    
+    /* Header Styles */
+    .premium-header {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 25px;
+        border-radius: 20px;
+        border: 1px solid rgba(255,255,255,0.1);
+        margin-bottom: 20px;
+        box-shadow: 0 12px 40px rgba(0,0,0,0.4);
+        text-align: center;
+    }
+    
+    .market-sentiment-bullish {
+        background: linear-gradient(135deg, #059669 0%, #047857 100%);
+        padding: 15px;
+        border-radius: 15px;
+        border: 2px solid #10b981;
+        text-align: center;
+        margin: 10px 0;
+    }
+    
+    .market-sentiment-bearish {
+        background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+        padding: 15px;
+        border-radius: 15px;
+        border: 2px solid #ef4444;
+        text-align: center;
+        margin: 10px 0;
+    }
+    
+    .market-sentiment-neutral {
+        background: linear-gradient(135deg, #6b7280 0%, #4b5563 100%);
+        padding: 15px;
+        border-radius: 15px;
+        border: 2px solid #9ca3af;
+        text-align: center;
+        margin: 10px 0;
+    }
+    
+    /* Signal Cards */
+    .signal-card-premium {
+        background: rgba(15, 23, 42, 0.9);
+        padding: 20px;
+        border-radius: 15px;
+        border: 2px solid;
+        margin: 12px 0;
+        transition: all 0.3s ease;
+        backdrop-filter: blur(15px);
+        box-shadow: 0 8px 25px rgba(0,0,0,0.3);
+    }
+    
+    .signal-card-premium:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 15px 35px rgba(0,0,0,0.4);
+    }
+    
+    .signal-strong-long {
+        border-color: #10b981;
+        background: linear-gradient(135deg, rgba(16, 185, 129, 0.1) 0%, rgba(15, 23, 42, 0.9) 100%);
+    }
+    
+    .signal-strong-short {
+        border-color: #ef4444;
+        background: linear-gradient(135deg, rgba(239, 68, 68, 0.1) 0%, rgba(15, 23, 42, 0.9) 100%);
+    }
+    
+    .signal-moderate {
+        border-color: #f59e0b;
+        background: linear-gradient(135deg, rgba(245, 158, 11, 0.1) 0%, rgba(15, 23, 42, 0.9) 100%);
+    }
+    
+    .signal-neutral {
+        border-color: #6b7280;
+        background: linear-gradient(135deg, rgba(107, 114, 128, 0.1) 0%, rgba(15, 23, 42, 0.9) 100%);
+    }
+    
+    /* Metric Cards */
+    .metric-card {
+        background: rgba(30, 41, 59, 0.8);
+        padding: 20px;
+        border-radius: 12px;
+        border: 1px solid rgba(255,255,255,0.05);
+        text-align: center;
+        margin: 5px;
+    }
+    
+    /* Progress Bars */
+    .stProgress > div > div > div > div {
+        background: linear-gradient(90deg, #ef4444 0%, #f59e0b 30%, #10b981 70%, #3b82f6 100%);
+    }
+    
+    /* Sidebar Styling */
+    .css-1d391kg {
+        background: linear-gradient(180deg, #0f172a 0%, #0a0f1d 100%);
+    }
+    
+    /* Button Styling */
+    .stButton > button {
+        border-radius: 10px;
+        font-weight: bold;
+        transition: all 0.3s ease;
+    }
+    
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# ---------------- CONFIGURATION ----------------
 CONTRACT_BASE = "https://contract.mexc.com/api/v1"
 INTERVAL_MAP = {'1m':'Min1','5m':'Min5','15m':'Min15','30m':'Min30','1h':'Min60','4h':'Hour4','1d':'Day1'}
 TV_INTERVAL_MAP = {'1m':'1','5m':'5','15m':'15','30m':'30','1h':'60','4h':'240','1d':'D'}
 DEFAULT_TFS = ['15m','1h','4h']
 ALL_TFS = ['1m','5m','15m','30m','1h','4h','1d']
 
-# Gelişmiş CSS Styling
-st.markdown("""
-<style>
-    /* Ana tema */
-    .main {
-        background: linear-gradient(135deg, #0c1426 0%, #0a0f1d 50%, #070b16 100%);
-        color: #e6eef6;
-    }
-    
-    /* Header ve kart stilleri */
-    .header-card {
-        background: linear-gradient(135deg, #1e3a8a 0%, #3730a3 100%);
-        padding: 20px;
-        border-radius: 15px;
-        border: 1px solid rgba(99, 102, 241, 0.3);
-        margin-bottom: 15px;
-        box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-    }
-    
-    .signal-card {
-        background: rgba(15, 23, 42, 0.8);
-        padding: 15px;
-        border-radius: 12px;
-        border: 1px solid rgba(255,255,255,0.1);
-        margin: 8px 0;
-        transition: all 0.3s ease;
-        backdrop-filter: blur(10px);
-    }
-    
-    .signal-card:hover {
-        transform: translateY(-2px);
-        border-color: rgba(99, 102, 241, 0.5);
-        box-shadow: 0 6px 20px rgba(99, 102, 241, 0.2);
-    }
-    
-    /* Sinyal etiketleri */
-    .signal-long {
-        background: linear-gradient(135deg, #059669 0%, #047857 100%);
-        color: white;
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-weight: bold;
-        font-size: 12px;
-    }
-    
-    .signal-short {
-        background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
-        color: white;
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-weight: bold;
-        font-size: 12px;
-    }
-    
-    .signal-neutral {
-        background: linear-gradient(135deg, #6b7280 0%, #4b5563 100%);
-        color: white;
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-weight: bold;
-        font-size: 12px;
-    }
-    
-    /* Progress bar */
-    .stProgress > div > div > div > div {
-        background: linear-gradient(90deg, #ef4444 0%, #f59e0b 50%, #10b981 100%);
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# ---------------- API FONKSİYONLARI ----------------
-def fetch_json(url, params=None, timeout=10):
+# ---------------- SECURE API FUNCTIONS ----------------
+def secure_fetch_json(url, params=None, timeout=8):
+    """Güvenli API çağrısı"""
     try:
-        r = requests.get(url, params=params, timeout=timeout)
-        r.raise_for_status()
-        return r.json()
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(url, params=params, headers=headers, timeout=timeout)
+        response.raise_for_status()
+        return response.json()
     except Exception as e:
-        logging.error(f"API hatası {url}: {str(e)}")
+        logger.error(f"API Error {url}: {str(e)}")
         return {}
 
-def fetch_contract_ticker():
-    url = f"{CONTRACT_BASE}/contract/ticker"
+def get_all_contract_symbols():
+    """Tüm vadeli işlem sembollerini getir"""
     try:
-        j = fetch_json(url)
-        return j.get('data', [])
-    except Exception:
-        return []
+        url = f"{CONTRACT_BASE}/contract/ticker"
+        data = secure_fetch_json(url)
+        symbols = [item['symbol'].replace('_', '') for item in data.get('data', []) if 'symbol' in item]
+        return sorted(list(set(symbols)))  # Benzersiz semboller
+    except Exception as e:
+        logger.error(f"Symbol fetch error: {str(e)}")
+        return ["BTCUSDT", "ETHUSDT", "ADAUSDT", "SOLUSDT", "DOTUSDT", "LINKUSDT", "MATICUSDT"]
 
-def get_top_contracts_by_volume(limit=200):
-    data = fetch_contract_ticker()
-    if not data:
-        return ["BTCUSDT", "ETHUSDT", "ADAUSDT", "DOTUSDT", "LINKUSDT"]  # Fallback semboller
+def fetch_klines_with_retry(symbol, interval, limit=300):
+    """Kline verilerini güvenli şekilde getir"""
+    mexc_symbol = symbol.replace('USDT', '_USDT') if not '_' in symbol else symbol
+    url = f"{CONTRACT_BASE}/contract/kline/{mexc_symbol}"
     
-    def vol(x):
-        return float(x.get('volume24') or x.get('amount24') or 0)
-    
-    items = sorted(data, key=vol, reverse=True)
-    syms = [it.get('symbol') for it in items[:limit]]
-    return [s.replace('_','') for s in syms if s]
-
-def mexc_symbol_from(symbol: str) -> str:
-    s = symbol.strip().upper()
-    if '_' in s: return s
-    if s.endswith('USDT'): return s[:-4] + "_USDT"
-    return s[:-4] + "_" + s[-4:]
-
-def fetch_contract_klines(symbol_mexc, interval_mexc, limit=200):
-    url = f"{CONTRACT_BASE}/contract/kline/{symbol_mexc}"
     try:
-        j = fetch_json(url, params={'interval': interval_mexc, 'limit': limit})
-        d = j.get('data') or {}
-        times = d.get('time', [])
-        if not times:
+        data = secure_fetch_json(url, params={'interval': interval, 'limit': limit})
+        if not data or 'data' not in data:
             return pd.DataFrame()
-        
+            
+        kline_data = data['data']
+        if not kline_data or 'time' not in kline_data:
+            return pd.DataFrame()
+            
         df = pd.DataFrame({
-            'timestamp': pd.to_datetime(d.get('time'), unit='s'),
-            'open': d.get('open'),
-            'high': d.get('high'), 
-            'low': d.get('low'),
-            'close': d.get('close'),
-            'volume': d.get('vol')
+            'timestamp': pd.to_datetime(kline_data['time'], unit='s'),
+            'open': kline_data['open'],
+            'high': kline_data['high'],
+            'low': kline_data['low'],
+            'close': kline_data['close'],
+            'volume': kline_data['vol']
         })
         
-        for c in ['open','high','low','close','volume']:
-            df[c] = pd.to_numeric(df[c], errors='coerce')
-        
+        # Veri tipi dönüşümü
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            
         return df.dropna()
+        
     except Exception as e:
-        logging.error(f"Kline hatası {symbol_mexc}: {str(e)}")
+        logger.error(f"Kline error {symbol}: {str(e)}")
         return pd.DataFrame()
 
-def fetch_contract_funding_rate(symbol_mexc):
-    url = f"{CONTRACT_BASE}/contract/funding_rate/{symbol_mexc}"
-    try:
-        j = fetch_json(url)
-        data = j.get('data') or {}
-        return {'fundingRate': float(data.get('fundingRate') or 0)}
-    except Exception:
-        return {'fundingRate': 0.0}
-
-# ---------------- GELİŞMİŞ TEKNİK ANALİZ ----------------
-def analyze_with_technical_indicators(df, symbol, timeframe):
-    """Çoklu teknik indikatör analizi yapar"""
-    if df.empty or len(df) < 100:  # Daha fazla veri gerekiyor
-        return None
-    
-    try:
-        # Tüm teknik indikatörleri hesapla
-        indicator_data = technical_indicators.calculate_all_indicators(df)
-        
-        if indicator_data is None or indicator_data.empty:
-            return None
-            
-        # Son sinyali al
-        latest = indicator_data.iloc[-1]
-        
-        # Trend analizi
-        current_trend = "BULLISH" if latest['primary_trend'] == 1 else "BEARISH"
-        trend_strength = latest['trend_strength']
-        
-        # Sinyal gücü
-        signal_strength = latest['signal_strength']
-        
-        # Momentum analizi
-        momentum = latest['momentum_score']
-        
-        # Volatilite analizi
-        volatility = latest['volatility_state']
-        
-        return {
-            'symbol': symbol,
-            'timeframe': timeframe,
-            'trend': current_trend,
-            'trend_strength': trend_strength,
-            'signal_strength': signal_strength,
-            'momentum': momentum,
-            'volatility': volatility,
-            'indicators': latest.to_dict(),
-            'indicator_data': indicator_data
-        }
-        
-    except Exception as e:
-        logging.error(f"Teknik analiz hatası {symbol}: {str(e)}")
-        return None
-
-# ---------------- GELİŞMİŞ TARAMA MOTORU ----------------
-@st.cache_data(ttl=120)
-def run_advanced_scan(symbols, timeframes, gemini_api_key, top_n=100):
+# ---------------- ENHANCED SCANNING ENGINE ----------------
+@st.cache_data(ttl=150, show_spinner=False)
+def run_premium_scan(selected_symbols, timeframes, trading_style, gemini_api_key):
+    """Premium tarama motoru"""
     results = []
+    total_symbols = len(selected_symbols)
+    
+    if total_symbols == 0:
+        return pd.DataFrame()
     
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    for idx, sym in enumerate(symbols[:top_n]):
-        status_text.text(f"📊 Analiz ediliyor: {sym} ({idx+1}/{top_n})")
-        progress_bar.progress((idx + 1) / top_n)
-        
-        entry = {
-            'symbol': sym, 
-            'details': {},
-            'technical_analysis': {},
-            'ai_predictions': {}
-        }
-        
-        mexc_sym = mexc_symbol_from(sym)
-        funding = fetch_contract_funding_rate(mexc_sym)
-        
-        best_tf_score = -1
-        best_tf = None
-        
-        for tf in timeframes:
-            interval = INTERVAL_MAP.get(tf)
-            if interval is None:
-                continue
-                
-            # Kline verilerini al
-            df = fetch_contract_klines(mexc_sym, interval, limit=300)  # Daha fazla veri
-            if df.empty or len(df) < 100:  # Minimum 100 bar
-                continue
+    for idx, symbol in enumerate(selected_symbols):
+        try:
+            status_text.text(f"🔍 Analiz: {symbol} ({idx+1}/{total_symbols})")
+            progress_bar.progress((idx + 1) / total_symbols)
             
-            # 1. Teknik İndikatör Analizi
-            technical_analysis = analyze_with_technical_indicators(df, sym, tf)
-            
-            if technical_analysis is None:
-                continue
-                
-            # 2. AI Analizi için indikatör snapshot'ı oluştur
-            indicators_snapshot = technical_indicators.create_ai_snapshot(df, funding, technical_analysis)
-            
-            # 3. Gelişmiş AI Analizi
-            try:
-                ai_analysis = ai_engine.get_ai_prediction(
-                    indicators_snapshot, 
-                    technical_analysis,
-                    api_key=gemini_api_key
-                )
-            except Exception as e:
-                logging.error(f"AI analiz hatası {sym}: {str(e)}")
-                continue
-            
-            # 4. Kombine skor hesapla
-            try:
-                combined_score = ai_engine.calculate_combined_score(ai_analysis, technical_analysis)
-            except Exception as e:
-                logging.error(f"Skor hesaplama hatası {sym}: {str(e)}")
-                combined_score = 50  # Varsayılan skor
-            
-            entry['details'][tf] = {
-                'price': float(df['close'].iloc[-1]),
-                'technical': technical_analysis,
-                'ai_analysis': ai_analysis,
-                'combined_score': combined_score,
-                'timestamp': datetime.utcnow().isoformat()
+            entry = {
+                'symbol': symbol,
+                'details': {},
+                'best_analysis': None,
+                'scan_time': datetime.utcnow().isoformat()
             }
             
-            # En iyi timeframe'i güncelle
-            if combined_score > best_tf_score:
-                best_tf_score = combined_score
-                best_tf = tf
-                entry['best_analysis'] = {
-                    'timeframe': tf,
-                    'technical': technical_analysis,
-                    'ai_analysis': ai_analysis,
-                    'combined_score': combined_score
+            best_score = -1
+            best_tf_data = None
+            
+            for tf in timeframes:
+                interval = INTERVAL_MAP.get(tf)
+                if not interval:
+                    continue
+                    
+                # Verileri getir
+                df = fetch_klines_with_retry(symbol, interval, 300)
+                if df.empty or len(df) < 100:
+                    continue
+                
+                # Teknik analiz
+                tech_analysis = technical_indicators.calculate_all_indicators(df)
+                if tech_analysis is None:
+                    continue
+                    
+                # Piyasa verileri
+                market_data = market_analysis.get_market_snapshot(symbol)
+                
+                # AI analizi
+                try:
+                    ai_result = ai_engine.get_ai_prediction(
+                        tech_analysis, 
+                        market_data, 
+                        trading_style,
+                        gemini_api_key
+                    )
+                except Exception as e:
+                    logger.warning(f"AI analysis failed for {symbol}: {str(e)}")
+                    continue
+                
+                # Skor hesaplama
+                score = ai_engine.calculate_premium_score(ai_result, tech_analysis, trading_style)
+                
+                entry['details'][tf] = {
+                    'technical': tech_analysis,
+                    'ai_analysis': ai_result,
+                    'score': score,
+                    'price': float(df['close'].iloc[-1])
                 }
-        
-        if entry.get('best_analysis'):
-            results.append(entry)
+                
+                # En iyi zaman dilimini güncelle
+                if score > best_score:
+                    best_score = score
+                    best_tf_data = {
+                        'timeframe': tf,
+                        'technical': tech_analysis,
+                        'ai_analysis': ai_result,
+                        'score': score,
+                        'price': float(df['close'].iloc[-1])
+                    }
+            
+            if best_tf_data:
+                entry['best_analysis'] = best_tf_data
+                results.append(entry)
+                
+        except Exception as e:
+            logger.error(f"Error scanning {symbol}: {str(e)}")
+            continue
     
     progress_bar.empty()
     status_text.empty()
     
     return pd.DataFrame(results) if results else pd.DataFrame()
 
-# ---------------- GELİŞMİŞ GÖRSELLEŞTİRME ----------------
-def create_technical_chart(df, indicator_data, symbol, timeframe):
-    """Teknik analiz grafiği oluşturur"""
-    
+# ---------------- ENHANCED VISUALIZATION ----------------
+def create_premium_chart(tech_data, symbol, timeframe):
+    """Premium teknik analiz grafiği"""
     try:
-        fig = make_subplots(rows=3, cols=1, shared_x=True,
-                           vertical_spacing=0.05,
-                           subplot_titles=(f'{symbol} - {timeframe} Price & Indicators', 
-                                         'Momentum Indicators',
-                                         'Volume & Oscillators'),
-                           row_heights=[0.5, 0.25, 0.25])
+        fig = make_subplots(
+            rows=4, cols=1,
+            shared_x=True,
+            vertical_spacing=0.03,
+            subplot_titles=(
+                f'🎯 {symbol} - {timeframe} Premium Analysis',
+                '📊 Momentum Indicators',
+                '📈 Volume Analysis', 
+                '⚡ Oscillators'
+            ),
+            row_heights=[0.4, 0.2, 0.2, 0.2]
+        )
         
-        # Candlestick
-        fig.add_trace(go.Candlestick(x=df['timestamp'],
-                                    open=df['open'],
-                                    high=df['high'],
-                                    low=df['low'],
-                                    close=df['close'],
-                                    name='Price'),
-                     row=1, col=1)
+        # Price and MAs
+        fig.add_trace(go.Candlestick(
+            x=tech_data['timestamp'],
+            open=tech_data['open'],
+            high=tech_data['high'],
+            low=tech_data['low'],
+            close=tech_data['close'],
+            name='Price'
+        ), row=1, col=1)
         
-        # Moving averages
-        if 'ema_20' in indicator_data.columns:
-            fig.add_trace(go.Scatter(x=indicator_data['timestamp'],
-                                    y=indicator_data['ema_20'],
-                                    line=dict(color='#3B82F6', width=1),
-                                    name='EMA 20'),
-                         row=1, col=1)
-        
-        if 'ema_50' in indicator_data.columns:
-            fig.add_trace(go.Scatter(x=indicator_data['timestamp'],
-                                    y=indicator_data['ema_50'],
-                                    line=dict(color='#EF4444', width=1),
-                                    name='EMA 50'),
-                         row=1, col=1)
-        
-        if 'ema_200' in indicator_data.columns:
-            fig.add_trace(go.Scatter(x=indicator_data['timestamp'],
-                                    y=indicator_data['ema_200'],
-                                    line=dict(color='#8B5CF6', width=2),
-                                    name='EMA 200'),
-                         row=1, col=1)
+        # EMA'lar
+        for ma_period in [20, 50, 200]:
+            if f'ema_{ma_period}' in tech_data.columns:
+                fig.add_trace(go.Scatter(
+                    x=tech_data['timestamp'],
+                    y=tech_data[f'ema_{ma_period}'],
+                    name=f'EMA {ma_period}',
+                    line=dict(width=2)
+                ), row=1, col=1)
         
         # RSI
-        if 'rsi' in indicator_data.columns:
-            fig.add_trace(go.Scatter(x=indicator_data['timestamp'],
-                                    y=indicator_data['rsi'],
-                                    line=dict(color='#F59E0B', width=2),
-                                    name='RSI'),
-                         row=2, col=1)
+        if 'rsi_14' in tech_data.columns:
+            fig.add_trace(go.Scatter(
+                x=tech_data['timestamp'],
+                y=tech_data['rsi_14'],
+                name='RSI',
+                line=dict(color='#F59E0B', width=2)
+            ), row=4, col=1)
             
             # RSI seviyeleri
-            fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
-            fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
-            fig.add_hline(y=50, line_dash="dot", line_color="gray", row=2, col=1)
+            fig.add_hline(y=70, line_dash="dash", line_color="red", row=4, col=1)
+            fig.add_hline(y=30, line_dash="dash", line_color="green", row=4, col=1)
+            fig.add_hline(y=50, line_dash="dot", line_color="gray", row=4, col=1)
         
         # MACD
-        if 'macd' in indicator_data.columns and 'macd_signal' in indicator_data.columns:
-            fig.add_trace(go.Scatter(x=indicator_data['timestamp'],
-                                    y=indicator_data['macd'],
-                                    line=dict(color='#10B981', width=2),
-                                    name='MACD'),
-                         row=3, col=1)
+        if all(col in tech_data.columns for col in ['macd', 'macd_signal']):
+            fig.add_trace(go.Scatter(
+                x=tech_data['timestamp'],
+                y=tech_data['macd'],
+                name='MACD',
+                line=dict(color='#10B981', width=2)
+            ), row=2, col=1)
             
-            fig.add_trace(go.Scatter(x=indicator_data['timestamp'],
-                                    y=indicator_data['macd_signal'],
-                                    line=dict(color='#EF4444', width=2),
-                                    name='MACD Signal'),
-                         row=3, col=1)
+            fig.add_trace(go.Scatter(
+                x=tech_data['timestamp'],
+                y=tech_data['macd_signal'],
+                name='MACD Signal',
+                line=dict(color='#EF4444', width=2)
+            ), row=2, col=1)
         
-        fig.update_layout(height=800, 
-                         template='plotly_dark',
-                         showlegend=True,
-                         xaxis_rangeslider_visible=False)
+        # Volume
+        colors = ['red' if tech_data['close'].iloc[i] < tech_data['open'].iloc[i] else 'green' 
+                 for i in range(len(tech_data))]
+        
+        fig.add_trace(go.Bar(
+            x=tech_data['timestamp'],
+            y=tech_data['volume'],
+            name='Volume',
+            marker_color=colors
+        ), row=3, col=1)
+        
+        fig.update_layout(
+            height=900,
+            template='plotly_dark',
+            showlegend=True,
+            xaxis_rangeslider_visible=False,
+            title_font_size=20
+        )
         
         return fig
         
     except Exception as e:
-        logging.error(f"Grafik oluşturma hatası: {str(e)}")
+        logger.error(f"Chart error: {str(e)}")
         return None
 
-# ---------------- ANA UYGULAMA ----------------
+# ---------------- MAIN APPLICATION ----------------
 def main():
-    # Header
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
+    try:
+        # Premium Header
         st.markdown("""
-        <div class='header-card'>
-            <h1 style='text-align: center; margin: 0; color: white;'>🚀 MEXC PRO AI SINYAL TERMİNALİ</h1>
-            <p style='text-align: center; margin: 5px 0 0 0; color: #cbd5e1;'>Çoklu İndikatör & Derin Öğrenme AI Sistemi</p>
+        <div class='premium-header'>
+            <h1 style='margin:0; color:white; font-size:2.5em;'>🚀 MEXC PRO AI TRADER</h1>
+            <p style='margin:0; color:#e0f2fe; font-size:1.2em;'>Premium Sinyal Sistemi • Gerçek Zamanlı AI Analiz</p>
         </div>
         """, unsafe_allow_html=True)
-    
-    # Sidebar
-    st.sidebar.markdown("### ⚙️ Tarama Ayarları")
-    
-    # API Key
-    gemini_api_key = st.sidebar.text_input(
-        "🔑 Gemini API Anahtarı", 
-        type="password",
-        help="Gelişmiş AI analizleri için Gemini API anahtarınızı girin"
-    )
-    
-    # Sembol seçimi
-    mode = st.sidebar.selectbox(
-        "📊 Sembol Kaynağı", 
-        ["Top by volume (200)", "Custom list"]
-    )
-    
-    if mode == "Custom list":
-        custom = st.sidebar.text_area(
-            "📝 Özel Sembol Listesi", 
-            value="BTCUSDT,ETHUSDT,ADAUSDT,SOLUSDT,AVAXUSDT",
-            help="Virgülle ayırarak sembolleri girin"
-        )
-        symbols = [s.strip().upper() for s in custom.split(',') if s.strip()]
-    else:
-        symbols = get_top_contracts_by_volume(200)
-    
-    if not symbols:
-        st.sidebar.error("❌ Sembol listesi boş.")
-        st.stop()
-    
-    # Zaman dilimleri
-    timeframes = st.sidebar.multiselect(
-        "⏰ Zaman Dilimleri", 
-        options=ALL_TFS, 
-        default=DEFAULT_TFS
-    )
-    
-    top_n = st.sidebar.slider(
-        "🔢 İlk N Coin Taransın", 
-        min_value=5, 
-        max_value=min(50, len(symbols)), 
-        value=min(25, len(symbols))
-    )
-    
-    # İndikatör ayarları
-    with st.sidebar.expander("📈 İndikatör Ayarları"):
-        st.checkbox("EMA Dizilimi", value=True)
-        st.checkbox("MACD Sinyali", value=True)
-        st.checkbox("RSI Extremum", value=True)
-        st.checkbox("Bollinger Bantları", value=True)
-        st.checkbox("Volume Analizi", value=True)
-        st.checkbox("Momentum İndikatörleri", value=True)
-    
-    # Tarama butonu
-    scan_clicked = st.sidebar.button(
-        "🔍 Gelişmiş Tarama Başlat", 
-        type="primary",
-        use_container_width=True
-    )
-    
-    # Session state yönetimi
-    if 'scan_results' not in st.session_state:
-        st.session_state.scan_results = pd.DataFrame()
-    if 'selected_symbol' not in st.session_state:
-        st.session_state.selected_symbol = None
-    
-    # Tarama işlemi
-    if scan_clicked:
-        with st.spinner("🚀 Gelişmiş tarama çalışıyor... Çoklu indikatör ve AI analizleri yapılıyor"):
-            try:
-                st.session_state.scan_results = run_advanced_scan(
-                    symbols, timeframes, gemini_api_key, top_n
-                )
-                st.session_state.last_scan = datetime.utcnow()
-                st.rerun()
-            except Exception as e:
-                st.error(f"Tarama hatası: {str(e)}")
-    
-    # Sonuçları göster
+        
+        # Piyasa Sentiment Gösterge
+        display_market_sentiment()
+        
+        # Sidebar - Güvenli Ayarlar
+        with st.sidebar:
+            st.markdown("### ⚙️ Premium Ayarlar")
+            
+            # Güvenli API Key Girişi
+            gemini_api_key = st.text_input(
+                "🔐 Gemini API Key",
+                type="password",
+                help="AI analizleri için API keyinizi girin",
+                placeholder="sk-proj-xxxxxxxxxxxxxxxx"
+            )
+            
+            # İşlem Stili Seçimi
+            trading_style = st.selectbox(
+                "🎯 İşlem Stili",
+                ["SCALP", "SWING", "POSITION"],
+                help="SCALP: 1m-15m, SWING: 1h-4h, POSITION: 4h-1d"
+            )
+            
+            # Zaman Dilimleri
+            timeframe_map = {
+                "SCALP": ['1m', '5m', '15m'],
+                "SWING": ['15m', '1h', '4h'], 
+                "POSITION": ['4h', '1d']
+            }
+            
+            timeframes = st.multiselect(
+                "⏰ Zaman Dilimleri",
+                options=ALL_TFS,
+                default=timeframe_map.get(trading_style, ['15m', '1h', '4h'])
+            )
+            
+            # Sembol Seçimi
+            st.markdown("### 📊 Sembol Seçimi")
+            all_symbols = get_all_contract_symbols()
+            
+            # Hızlı seçim butonları
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if st.button("🎯 Major Coins", use_container_width=True):
+                    st.session_state.selected_symbols = ["BTCUSDT", "ETHUSDT", "ADAUSDT", "SOLUSDT", "DOTUSDT"]
+            with col2:
+                if st.button("🔥 Trend Coins", use_container_width=True):
+                    st.session_state.selected_symbols = ["AVAXUSDT", "MATICUSDT", "LINKUSDT", "ATOMUSDT", "NEARUSDT"]
+            with col3:
+                if st.button("📈 All Coins", use_container_width=True):
+                    st.session_state.selected_symbols = all_symbols[:50]
+            
+            # Multi-select sembol seçimi
+            selected_symbols = st.multiselect(
+                "💰 Semboller Seçin",
+                options=all_symbols,
+                default=st.session_state.get('selected_symbols', ["BTCUSDT", "ETHUSDT"]),
+                help="Analiz edilecek sembolleri seçin"
+            )
+            
+            # Tarama butonu
+            scan_clicked = st.button(
+                "🚀 PREMIUM TARAMA BAŞLAT",
+                type="primary",
+                use_container_width=True,
+                help="Seçili sembolleri AI ile tarar"
+            )
+        
+        # Session state yönetimi
+        if 'scan_results' not in st.session_state:
+            st.session_state.scan_results = pd.DataFrame()
+        if 'selected_symbol' not in st.session_state:
+            st.session_state.selected_symbol = None
+        if 'saved_signals' not in st.session_state:
+            st.session_state.saved_signals = []
+        
+        # Tarama işlemi
+        if scan_clicked and selected_symbols:
+            with st.spinner("🚀 Premium tarama çalışıyor... AI derin analiz yapıyor"):
+                try:
+                    st.session_state.scan_results = run_premium_scan(
+                        selected_symbols, timeframes, trading_style, gemini_api_key
+                    )
+                    st.session_state.last_scan = datetime.utcnow()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Tarama hatası: {str(e)}")
+        
+        # Sonuçları göster
+        display_results()
+        
+    except Exception as e:
+        logger.error(f"Main app error: {str(e)}")
+        st.error("Uygulamada bir hata oluştu. Lütfen sayfayı yenileyin.")
+
+def display_market_sentiment():
+    """Piyasa sentiment göstergesi"""
+    try:
+        sentiment = market_analysis.get_market_sentiment()
+        
+        if sentiment['sentiment'] == "BULLISH":
+            st.markdown(f"""
+            <div class='market-sentiment-bullish'>
+                <h3>🎯 PİYASA TAHMİNİ: GÜÇLÜ AL</h3>
+                <p>💰 Fear & Greed: {sentiment['fear_greed']} | 📊 Trend: {sentiment['trend_strength']}%</p>
+                <p>🔍 {sentiment['analysis']}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        elif sentiment['sentiment'] == "BEARISH":
+            st.markdown(f"""
+            <div class='market-sentiment-bearish'>
+                <h3>🎯 PİYASA TAHMİNİ: GÜÇLÜ SAT</h3>
+                <p>💰 Fear & Greed: {sentiment['fear_greed']} | 📊 Trend: {sentiment['trend_strength']}%</p>
+                <p>🔍 {sentiment['analysis']}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div class='market-sentiment-neutral'>
+                <h3>🎯 PİYASA TAHMİNİ: NÖTR</h3>
+                <p>💰 Fear & Greed: {sentiment['fear_greed']} | 📊 Trend: {sentiment['trend_strength']}%</p>
+                <p>🔍 {sentiment['analysis']}</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+    except Exception as e:
+        logger.error(f"Sentiment error: {str(e)}")
+
+def display_results():
+    """Tarama sonuçlarını göster"""
     df = st.session_state.scan_results
     
     if df.empty:
-        st.info("""
-        ## 📋 Başlarken
-        
-        **MEXC Pro AI Sinyal Terminali'ne hoş geldiniz!**
-        
-        🎯 **Özellikler:**
-        - 🤖 **Gelişmiş AI Analiz** - Gemini AI + Çoklu İndikatör
-        - 📊 **20+ Teknik İndikatör** - Kapsamlı teknik analiz
-        - ⚡ **Gerçek Zamanlı Sinyaller** - Anlık al/sat önerileri
-        - 🎨 **Interaktif Grafikler** - Profesyonel görselleştirme
-        - 📈 **Risk Yönetimi** - Akıllı pozisyon hesaplama
-        
-        **Başlamak için sol menüden ayarları yapıp 'Gelişmiş Tarama Başlat' butonuna tıklayın.**
-        """)
-        
-    else:
-        # AI Sinyal Listesi
-        display_ai_signals(df)
-        
-        # Seçili Sembol Detayları
-        display_selected_symbol_details(df, gemini_api_key)
-
-def display_ai_signals(df):
-    """AI sinyallerini göster"""
+        show_welcome_screen()
+        return
     
-    st.markdown("### 🔥 AI Sinyal Listesi")
+    # Premium Sinyal Listesi
+    st.markdown("### 🎯 PREMIUM AI SİNYALLERİ")
     
     # Filtreler
-    col1, col2, col3 = st.columns([2, 1, 1])
+    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
     
     with col1:
-        filter_signal = st.selectbox("Sinyal Türü", ["Tümü", "LONG", "SHORT", "NEUTRAL"])
+        signal_filter = st.selectbox("Sinyal Tipi", ["TÜMÜ", "GÜÇLÜ AL", "AL", "NÖTR", "SAT", "GÜÇLÜ SAT"])
     
     with col2:
-        min_confidence = st.slider("Min Güven %", 0, 100, 70)
+        min_confidence = st.slider("Min Güven", 0, 100, 75)
     
     with col3:
-        sort_by = st.selectbox("Sırala", ["Güven", "Trend Gücü", "Kombine Skor"])
+        min_score = st.slider("Min Skor", 0, 100, 60)
     
-    # Sinyal kartları
+    with col4:
+        sort_by = st.selectbox("Sırala", ["SKOR", "GÜVEN", "TREND"])
+    
+    # Sinyalleri filtrele ve göster
+    filtered_signals = filter_and_sort_signals(df, signal_filter, min_confidence, min_score, sort_by)
+    display_signal_cards(filtered_signals)
+    
+    # Seçili sembol detayları
+    if st.session_state.get('selected_symbol'):
+        display_symbol_details()
+
+def show_welcome_screen():
+    """Hoş geldin ekranı"""
+    st.markdown("""
+    <div style='text-align: center; padding: 50px 20px;'>
+        <h1 style='color: #3b82f6; font-size: 3em;'>🎯 MEXC PRO TRADER</h1>
+        <p style='color: #9ca3af; font-size: 1.3em;'>Premium AI Sinyal Sistemi</p>
+        
+        <div style='margin: 40px 0;'>
+            <div style='display: inline-block; margin: 10px; padding: 20px; background: rgba(30, 41, 59, 0.8); border-radius: 15px; width: 200px;'>
+                <h3>🚀 SCALP</h3>
+                <p>1m-15m timeframe<br>Hızlı işlemler</p>
+            </div>
+            <div style='display: inline-block; margin: 10px; padding: 20px; background: rgba(30, 41, 59, 0.8); border-radius: 15px; width: 200px;'>
+                <h3>📊 SWING</h3>
+                <p>1h-4h timeframe<br>Orta vadeli</p>
+            </div>
+            <div style='display: inline-block; margin: 10px; padding: 20px; background: rgba(30, 41, 59, 0.8); border-radius: 15px; width: 200px;'>
+                <h3>💎 POSITION</h3>
+                <p>4h-1d timeframe<br>Uzun vadeli</p>
+            </div>
+        </div>
+        
+        <p style='color: #6b7280;'>Başlamak için sol menüden sembolleri seçin ve Premium Tarama başlatın</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+def filter_and_sort_signals(df, signal_filter, min_confidence, min_score, sort_by):
+    """Sinyalleri filtrele ve sırala"""
     signals = []
+    
     for _, row in df.iterrows():
         if not row.get('best_analysis'):
             continue
             
         analysis = row['best_analysis']
         ai_analysis = analysis.get('ai_analysis', {})
-        technical = analysis.get('technical', {})
         
         signal_info = {
             'symbol': row['symbol'],
             'timeframe': analysis['timeframe'],
             'signal': ai_analysis.get('signal', 'NEUTRAL'),
             'confidence': ai_analysis.get('confidence', 0),
-            'trend_strength': technical.get('trend_strength', 0) * 100,
-            'combined_score': analysis.get('combined_score', 0),
-            'price': analysis.get('ai_analysis', {}).get('entry', 0),
+            'score': analysis.get('score', 0),
+            'price': analysis.get('price', 0),
             'explanation': ai_analysis.get('explanation', ''),
-            'targets': ai_analysis.get('take_profit'),
-            'stop_loss': ai_analysis.get('stop_loss')
+            'entry': ai_analysis.get('entry'),
+            'stop_loss': ai_analysis.get('stop_loss'),
+            'take_profit': ai_analysis.get('take_profit'),
+            'risk_reward': ai_analysis.get('risk_reward', 0)
         }
+        
+        # Filtreleme
+        if signal_filter != "TÜMÜ" and signal_info['signal'] != signal_filter:
+            continue
+            
+        if signal_info['confidence'] < min_confidence:
+            continue
+            
+        if signal_info['score'] < min_score:
+            continue
+            
         signals.append(signal_info)
     
-    # Filtreleme
-    filtered_signals = [s for s in signals if s['confidence'] >= min_confidence]
-    
-    if filter_signal != "Tümü":
-        filtered_signals = [s for s in filtered_signals if s['signal'] == filter_signal]
-    
     # Sıralama
-    if sort_by == "Güven":
-        filtered_signals.sort(key=lambda x: x['confidence'], reverse=True)
-    elif sort_by == "Trend Gücü":
-        filtered_signals.sort(key=lambda x: x['trend_strength'], reverse=True)
+    if sort_by == "SKOR":
+        signals.sort(key=lambda x: x['score'], reverse=True)
+    elif sort_by == "GÜVEN":
+        signals.sort(key=lambda x: x['confidence'], reverse=True)
     else:
-        filtered_signals.sort(key=lambda x: x['combined_score'], reverse=True)
+        signals.sort(key=lambda x: x['score'], reverse=True)
     
-    # Sinyal kartlarını göster
-    cols = st.columns(3)
-    for idx, signal in enumerate(filtered_signals[:12]):
-        with cols[idx % 3]:
-            display_signal_card(signal, idx)
+    return signals
 
-def display_signal_card(signal, idx):
-    """Tekil sinyal kartını göster"""
+def display_signal_cards(signals):
+    """Sinyal kartlarını göster"""
+    if not signals:
+        st.info("🤔 Filtrelerinize uygun sinyal bulunamadı")
+        return
     
-    signal_class = {
-        'LONG': 'signal-long',
-        'SHORT': 'signal-short',
-        'NEUTRAL': 'signal-neutral'
-    }.get(signal['signal'], 'signal-neutral')
+    # Sinyal kartları için grid
+    cols = st.columns(2)
     
-    emoji = {
-        'LONG': '🚀',
-        'SHORT': '🔻', 
-        'NEUTRAL': '⚪'
-    }.get(signal['signal'], '⚪')
+    for idx, signal in enumerate(signals):
+        with cols[idx % 2]:
+            display_single_signal_card(signal, idx)
+
+def display_single_signal_card(signal, idx):
+    """Tek sinyal kartını göster"""
+    # Sinyal tipine göre stil
+    signal_class = "signal-neutral"
+    signal_emoji = "⚪"
+    
+    if signal['signal'] == 'GÜÇLÜ AL':
+        signal_class = "signal-strong-long"
+        signal_emoji = "🚀"
+    elif signal['signal'] == 'AL':
+        signal_class = "signal-moderate"
+        signal_emoji = "📈"
+    elif signal['signal'] == 'SAT':
+        signal_class = "signal-moderate" 
+        signal_emoji = "📉"
+    elif signal['signal'] == 'GÜÇLÜ SAT':
+        signal_class = "signal-strong-short"
+        signal_emoji = "🔻"
     
     st.markdown(f"""
-    <div class='signal-card'>
-        <div style='display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;'>
-            <h4 style='margin: 0; color: white;'>{emoji} {signal['symbol']}</h4>
-            <span class='{signal_class}'>{signal['signal']}</span>
+    <div class='signal-card-premium {signal_class}'>
+        <div style='display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;'>
+            <h3 style='margin: 0; color: white;'>{signal_emoji} {signal['symbol']}</h3>
+            <div style='background: rgba(255,255,255,0.1); padding: 5px 12px; border-radius: 20px;'>
+                <strong>{signal['signal']}</strong>
+            </div>
         </div>
         
-        <div style='font-size: 12px; color: #cbd5e1;'>
-            <div>⏰ TF: {signal['timeframe']}</div>
+        <div style='display: grid; grid-template-columns: 1fr 1fr; gap: 10px; font-size: 14px;'>
+            <div>⏰ Zaman: <strong>{signal['timeframe']}</strong></div>
             <div>🎯 Güven: <strong>{signal['confidence']}%</strong></div>
-            <div>💪 Trend: <strong>{signal['trend_strength']:.0f}%</strong></div>
-            <div>💰 Fiyat: ${signal['price']:.4f}</div>
+            <div>💎 Skor: <strong>{signal['score']}/100</strong></div>
+            <div>💰 Fiyat: <strong>${signal['price']:.4f}</strong></div>
+        </div>
+        
+        <div style='margin-top: 15px; padding: 10px; background: rgba(255,255,255,0.05); border-radius: 8px;'>
+            <div style='font-size: 12px; color: #cbd5e1;'>
+                🎯 Giriş: <strong>${signal['entry']:.4f if signal['entry'] else 'N/A'}</strong> | 
+                🛑 Stop: <strong>${signal['stop_loss']:.4f if signal['stop_loss'] else 'N/A'}</strong> |
+                🎯 Hedef: <strong>${signal['take_profit']:.4f if signal['take_profit'] else 'N/A'}</strong>
+            </div>
         </div>
     </div>
     """, unsafe_allow_html=True)
     
-    if st.button("📈 Detaylı Analiz", key=f"btn_{idx}", use_container_width=True):
-        st.session_state.selected_symbol = signal['symbol']
-
-def display_selected_symbol_details(df, api_key):
-    """Seçili sembolün detaylı analizini göster"""
-    
-    st.markdown("---")
-    st.markdown("### 📊 Detaylı Teknik Analiz")
-    
-    # Sembol seçimi
-    symbols = [row['symbol'] for _, row in df.iterrows() if row.get('best_analysis')]
-    selected_symbol = st.session_state.get('selected_symbol') 
-    
-    if not selected_symbol and symbols:
-        selected_symbol = symbols[0]
-    
-    if not selected_symbol:
-        st.warning("⚠️ Analiz edilecek sembol bulunamadı")
-        return
-    
-    # Sembol seçicisi
-    col1, col2 = st.columns([2, 1])
+    # Butonlar
+    col1, col2 = st.columns(2)
     with col1:
-        selected_symbol = st.selectbox("Sembol Seçin:", symbols, 
-                                     index=symbols.index(selected_symbol) if selected_symbol in symbols else 0)
+        if st.button("📊 Detaylı Analiz", key=f"detail_{idx}", use_container_width=True):
+            st.session_state.selected_symbol = signal['symbol']
+    with col2:
+        if st.button("💾 Sinyali Kaydet", key=f"save_{idx}", use_container_width=True):
+            save_signal_to_history(signal)
+
+def display_symbol_details():
+    """Seçili sembolün detaylarını göster"""
+    symbol = st.session_state.selected_symbol
+    df = st.session_state.scan_results
     
-    # Seçili sembolün verilerini al
-    symbol_data = next((row for _, row in df.iterrows() if row['symbol'] == selected_symbol), None)
-    if not symbol_data or not symbol_data.get('best_analysis'):
-        st.error("❌ Seçili sembol için analiz bulunamadı")
+    if not symbol or df.empty:
         return
+        
+    symbol_data = next((row for _, row in df.iterrows() if row['symbol'] == symbol), None)
+    if not symbol_data:
+        return
+        
+    st.markdown("---")
+    st.markdown(f"### 📊 {symbol} Detaylı Analiz")
     
     analysis = symbol_data['best_analysis']
     ai_analysis = analysis.get('ai_analysis', {})
     technical = analysis.get('technical', {})
     
-    # Ana metrikler
+    # Metrikler
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
@@ -638,91 +737,96 @@ def display_selected_symbol_details(df, api_key):
                  f"%{ai_analysis.get('confidence', 0)} Güven")
     
     with col2:
-        st.metric("📊 Trend", technical.get('trend', 'N/A'),
-                 f"%{technical.get('trend_strength', 0) * 100:.0f} Güç")
+        st.metric("💎 AI Skoru", f"{analysis.get('score', 0)}/100")
     
     with col3:
-        current_price = ai_analysis.get('entry', 0)
-        st.metric("💰 Mevcut Fiyat", f"${current_price:.4f}")
+        st.metric("💰 Mevcut Fiyat", f"${analysis.get('price', 0):.4f}")
     
     with col4:
-        st.metric("🎯 Kombine Skor", f"{analysis.get('combined_score', 0):.0f}")
+        st.metric("⏰ Zaman Dilimi", analysis.get('timeframe', 'N/A'))
     
-    # Grafik ve analiz bölümü
+    # Grafik ve detaylar
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        # Teknik Analiz Grafiği
-        if technical.get('indicator_data') is not None:
-            fig = create_technical_chart(
-                technical['indicator_data'], 
-                technical['indicator_data'],
-                selected_symbol, 
-                analysis['timeframe']
-            )
+        if not technical.empty:
+            fig = create_premium_chart(technical, symbol, analysis['timeframe'])
             if fig:
                 st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.warning("📊 Grafik oluşturulamadı")
-        else:
-            st.warning("📊 Grafik verisi mevcut değil")
     
     with col2:
         # Ticaret planı
         st.markdown("#### 🎯 Ticaret Planı")
         
-        entry = ai_analysis.get('entry', 0)
-        stop_loss = ai_analysis.get('stop_loss', 0)
-        take_profit = ai_analysis.get('take_profit', 0)
+        if all(k in ai_analysis for k in ['entry', 'stop_loss', 'take_profit']):
+            display_trade_plan(ai_analysis)
         
-        if entry and stop_loss and take_profit:
-            risk = abs(entry - stop_loss)
-            reward = abs(take_profit - entry)
-            rr_ratio = reward / risk if risk > 0 else 0
-            
-            st.metric("🎯 Giriş", f"${entry:.4f}")
-            st.metric("🛑 Stop Loss", f"${stop_loss:.4f}")
-            st.metric("🎯 Take Profit", f"${take_profit:.4f}")
-            st.metric("⚖️ R/R Oranı", f"{rr_ratio:.2f}:1")
-            
-            # Kazanç hesaplama
-            if st.button("📈 Potansiyel Kazanç Hesapla", use_container_width=True):
-                calculate_profit_potential(entry, stop_loss, take_profit)
+        # AI Analizi
+        st.markdown("#### 🤖 AI Analiz Raporu")
+        st.write(ai_analysis.get('explanation', 'Analiz mevcut değil'))
         
-        # AI Açıklaması
-        st.markdown("#### 🤖 AI Analizi")
-        explanation = ai_analysis.get('explanation', 'Açıklama mevcut değil.')
-        st.write(explanation)
-    
-    # Detaylı İndikatör Tablosu
-    with st.expander("📋 Detaylı İndikatör Verileri"):
-        if technical.get('indicators'):
-            indicators_df = pd.DataFrame([technical['indicators']]).T
-            indicators_df.columns = ['Değer']
-            st.dataframe(indicators_df, use_container_width=True)
+        # Sinyal kaydetme
+        if st.button("💾 Bu Sinyali Kaydet", use_container_width=True):
+            save_signal_to_history({
+                'symbol': symbol,
+                'timeframe': analysis['timeframe'],
+                'signal': ai_analysis.get('signal'),
+                'confidence': ai_analysis.get('confidence'),
+                'entry': ai_analysis.get('entry'),
+                'stop_loss': ai_analysis.get('stop_loss'),
+                'take_profit': ai_analysis.get('take_profit'),
+                'timestamp': datetime.utcnow().isoformat()
+            })
+            st.success("✅ Sinyal kaydedildi!")
 
-def calculate_profit_potential(entry, stop_loss, take_profit):
-    """Potansiyel kazanç hesaplama"""
+def display_trade_plan(ai_analysis):
+    """Ticaret planını göster"""
+    entry = ai_analysis.get('entry', 0)
+    stop_loss = ai_analysis.get('stop_loss', 0)
+    take_profit = ai_analysis.get('take_profit', 0)
     
+    if entry and stop_loss and take_profit:
+        risk = abs(entry - stop_loss)
+        reward = abs(take_profit - entry)
+        rr_ratio = reward / risk if risk > 0 else 0
+        
+        st.metric("🎯 Giriş", f"${entry:.4f}")
+        st.metric("🛑 Stop Loss", f"${stop_loss:.4f}")
+        st.metric("🎯 Take Profit", f"${take_profit:.4f}")
+        st.metric("⚖️ Risk/Ödül", f"{rr_ratio:.2f}:1")
+        
+        # Risk hesaplama
+        if st.button("📈 Risk Hesapla", use_container_width=True):
+            calculate_risk_management(entry, stop_loss, take_profit)
+
+def calculate_risk_management(entry, stop_loss, take_profit):
+    """Risk yönetimi hesaplamaları"""
     risk = abs(entry - stop_loss)
     reward = abs(take_profit - entry)
-    
-    if risk == 0:
-        st.error("❌ Risk hesaplanamıyor")
-        return
-    
-    rr_ratio = reward / risk
+    rr_ratio = reward / risk if risk > 0 else 0
     
     st.success(f"""
-    **💰 Potansiyel Kazanç Analizi:**
+    **💰 Risk Yönetimi:**
     
     - ⚠️ **Risk:** ${risk:.4f} (%{(risk/entry)*100:.2f})
     - 🎯 **Ödül:** ${reward:.4f} (%{(reward/entry)*100:.2f})  
     - ⚖️ **Risk/Ödül Oranı:** {rr_ratio:.2f}:1
-    - 📈 **Başarı Oranı Gereksinimi:** %{100/(1+rr_ratio):.1f}
+    - 📈 **Minimum Başarı Oranı:** %{100/(1+rr_ratio):.1f}
     
-    💡 **Öneri:** {'Mükemmel trade!' if rr_ratio >= 2 else 'İyi trade' if rr_ratio >= 1.5 else 'Dikkatli olun'}
+    💡 **Değerlendirme:** {'🚀 MÜKEMMEL!' if rr_ratio >= 2 else '✅ İYİ' if rr_ratio >= 1.5 else '⚠️ DİKKAT'}
     """)
+
+def save_signal_to_history(signal):
+    """Sinyali geçmişe kaydet"""
+    if 'saved_signals' not in st.session_state:
+        st.session_state.saved_signals = []
+    
+    signal['saved_at'] = datetime.utcnow().isoformat()
+    st.session_state.saved_signals.append(signal)
+    
+    # En fazla 50 sinyal sakla
+    if len(st.session_state.saved_signals) > 50:
+        st.session_state.saved_signals = st.session_state.saved_signals[-50:]
 
 if __name__ == "__main__":
     main()
