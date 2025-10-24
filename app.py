@@ -1,5 +1,5 @@
 # app.py
-# Streamlit MEXC contract sinyal uygulaması - (Yeni Hibrit AI Motoru entegre edildi)
+# Streamlit MEXC contract sinyal uygulaması - (Hata düzeltildi, UI ve AI geliştirildi)
 
 import streamlit as st
 import pandas as pd
@@ -9,6 +9,7 @@ import requests
 from datetime import datetime
 import ai_engine  # <-- Yeni motorumuz
 import streamlit.components.v1 as components
+import json
 
 # optional plotly for indicator bars
 try:
@@ -36,6 +37,13 @@ body { background: #0b0f14; color: #e6eef6; }
 .coin-row:hover { background: rgba(255,255,255,0.02); }
 .small-muted { color:#9aa3b2; font-size:12px; }
 .score-card { background:#081226; padding:8px; border-radius:8px; text-align:center; }
+/* st.metric için daha büyük yazı tipi */
+[data-testid="stMetricValue"] {
+    font-size: 24px;
+}
+[data-testid="stMetricLabel"] {
+    font-size: 16px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -237,7 +245,11 @@ def score_signals(latest, prev, funding, weights):
 @st.cache_data(ttl=120)
 def run_scan(symbols, timeframes, weights, thresholds, gemini_api_key, top_n=100):
     results = []
-    for sym in symbols[:top_n]:
+    
+    # top_n, taranacak sembol listesinin uzunluğunu geçemez
+    symbols_to_scan = symbols[:min(top_n, len(symbols))]
+    
+    for sym in symbols_to_scan:
         entry = {'symbol': sym, 'details': {}}
         best_score = None; best_tf = None; buy_count=0; strong_buy=0; sell_count=0
         mexc_sym = mexc_symbol_from(sym)
@@ -258,7 +270,7 @@ def run_scan(symbols, timeframes, weights, thresholds, gemini_api_key, top_n=100
             
             latest = df_ind.iloc[-1]; prev = df_ind.iloc[-2]
             
-            # Eski skorlama sistemi hala çalışıyor (Heuristic AI için girdi olarak)
+            # Eski skorlama sistemi (Heuristic AI için girdi olarak)
             score, per_scores, reasons = score_signals(latest, prev, funding, weights)
             label = label_from_score(score, thresholds)
             
@@ -270,7 +282,9 @@ def run_scan(symbols, timeframes, weights, thresholds, gemini_api_key, top_n=100
                 'macd_hist': float(latest.get('macd_hist', np.nan)),
                 'vol_osc': float(latest.get('vol_osc', np.nan)),
                 'atr14': float(latest.get('atr14', np.nan)),
-                'nw_slope': float(latest.get('nw_slope', np.nan))
+                'nw_slope': float(latest.get('nw_slope', np.nan)),
+                'bb_upper': float(latest.get('bb_upper', np.nan)), # <-- YENİ EKLENDİ
+                'bb_lower': float(latest.get('bb_lower', np.nan))  # <-- YENİ EKLENDİ
             }
             ai_analysis = ai_engine.get_ai_prediction(indicators_snapshot, api_key=gemini_api_key)
             # --- BİTTİ ---
@@ -281,19 +295,17 @@ def run_scan(symbols, timeframes, weights, thresholds, gemini_api_key, top_n=100
                 'ai_analysis': ai_analysis  # <-- Yeni AI analiz sonucunu buraya kaydet
             }
             
-            # En iyi skoru hala eski skora göre tutabiliriz veya AI güvenine göre
             current_best_metric = ai_analysis.get('confidence', 0) if ai_analysis.get('signal') != 'NEUTRAL' else 0
             if best_score is None or current_best_metric > best_score:
                 best_score = current_best_metric
                 best_tf = tf
             
-            # Eski sayımlar (isteğe bağlı)
             if label in ['AL','GÜÇLÜ AL']: buy_count += 1
             if label == 'GÜÇLÜ AL': strong_buy += 1
             if label in ['SAT','GÜÇLÜ SAT']: sell_count += 1
             
         entry['best_timeframe'] = best_tf
-        entry['best_score'] = int(best_score) if best_score is not None else None # Artık bu 'en iyi güven' anlamına geliyor
+        entry['best_score'] = int(best_score) if best_score is not None else None # Artık bu 'en iyi güven'
         entry['buy_count'] = buy_count
         entry['strong_buy_count'] = strong_buy
         entry['sell_count'] = sell_count
@@ -339,25 +351,40 @@ def show_tradingview(symbol: str, interval_tv: str, height: int = 480):
 st.title("🔥 MEXC Vadeli — Profesyonel Sinyal Paneli (Hibrit AI)")
 st.sidebar.header("Tarama Ayarları")
 
-# --- YENİ: GEMINI API ANAHTARI GİRDİSİ ---
 gemini_api_key = st.sidebar.text_input("Gemini API Anahtarı (Opsiyonel)", type="password", help="Daha gelişmiş analiz için Gemini API anahtarınızı girin.")
 
 mode = st.sidebar.selectbox("Sembol kaynağı", ["Top by volume (200)","Custom list"])
+
+# --- HATA DÜZELTMESİ: SLIDER LOGIĞI ---
 if mode == "Custom list":
     custom = st.sidebar.text_area("Virgülle ayrılmış semboller (örn: BTCUSDT,ETHUSDT)", value="BTCUSDT,ETHUSDT")
     symbols = [s.strip().upper() for s in custom.split(',') if s.strip()]
+    top_n = len(symbols) # Custom listedeki tüm sembolleri tara
 else:
     symbols = get_top_contracts_by_volume(200)
+    # Slider'ı sadece "Top by volume" seçiliyse göster ve max_value'yu sabitle
+    top_n = st.sidebar.slider("İlk N coin taransın", min_value=5, max_value=200, value=50)
 
 if not symbols:
-    st.sidebar.error("Sembol listesi boş.")
+    st.sidebar.error("Sembol listesi boş. Lütfen 'Custom list' kullanıyorsanız en az bir sembol girin.")
     st.stop()
+# --- HATA DÜZELTMESİ SONU ---
 
 timeframes = st.sidebar.multiselect("Zaman dilimleri", options=ALL_TFS, default=DEFAULT_TFS)
-top_n = st.sidebar.slider("İlk N coin taransın", min_value=5, max_value=min(200,len(symbols)), value=min(50,len(symbols)))
 
-# Eski ağırlıklar ve eşikler (Heuristic motor için hala gerekli)
-with st.sidebar.expander("Heuristic Ağırlıklar (Eski Sistem)"):
+# --- YENİ: ALGORİTMA AÇIKLAMASI ---
+with st.sidebar.expander("Sistem Algoritması Sinyal Mantığı"):
+    st.markdown("""
+    Algoritma (Gemini AI kapalıyken), sinyalleri puanlamak için bu kuralları kullanır:
+    - **RSI (Göreceli Güç Endeksi):** 30'un altı (Aşırı Satım) **LONG** için güçlü bir sinyaldir. 70'in üstü (Aşırı Alım) **SHORT** için güçlü bir sinyaldir.
+    - **MACD Histogram:** Pozitif (0'ın üzeri) olması **LONG** momentumunu, negatif olması **SHORT** momentumunu destekler.
+    - **Nadaraya-Watson (nw_slope):** Bu, trendin yönünü belirler. Pozitif eğim **LONG**, negatif eğim **SHORT** sinyalini güçlendirir.
+    - **Bollinger Bantları (BB):** Fiyatın üst bandı (`bb_upper`) kırması bir **SHORT** (geri çekilme) sinyali, alt bandı (`bb_lower`) kırması bir **LONG** (tepki) sinyali olarak değerlendirilir.
+    - **Hacim (vol_osc):** Yüksek hacim, mevcut trendin (RSI, MACD veya NW) gücünü onaylar.
+    """)
+
+# --- YENİ: İSİMLENDİRME GÜNCELLENDİ ---
+with st.sidebar.expander("Sistem Algoritması Ağırlıkları (Heuristic)"):
     w_ema = st.number_input("EMA", value=DEFAULT_WEIGHTS['ema'])
     w_macd = st.number_input("MACD", value=DEFAULT_WEIGHTS['macd'])
     w_rsi = st.number_input("RSI", value=DEFAULT_WEIGHTS['rsi'])
@@ -367,7 +394,7 @@ with st.sidebar.expander("Heuristic Ağırlıklar (Eski Sistem)"):
     w_funding = st.number_input("Funding", value=DEFAULT_WEIGHTS['funding'])
     w_nw = st.number_input("NW slope", value=DEFAULT_WEIGHTS['nw'])
 weights = {'ema':w_ema,'macd':w_macd,'rsi':w_rsi,'bb':w_bb,'adx':w_adx,'vol':w_vol,'funding':w_funding,'nw':w_nw}
-with st.sidebar.expander("Heuristic Sinyal Eşikleri (Eski Sistem)"):
+with st.sidebar.expander("Sistem Algoritması Sinyal Eşikleri"):
     strong_buy_t = st.slider("GÜÇLÜ AL ≥", 10, 100, 60)
     buy_t = st.slider("AL ≥", 0, 80, 20)
     sell_t = st.slider("SAT ≤", -80, 0, -20)
@@ -464,11 +491,15 @@ else:
             row = next((x for x in ai_list if x['symbol']==sel), None)
             if row:
                 st.markdown("#### 🧠 AI Analizi ve Ticaret Planı")
-                st.markdown(row['ai_text']) # Artık bu, Gemini'den veya Heuristic'ten gelen tam açıklamayı içeriyor
+                st.markdown(row['ai_text']) # Gemini'den veya Heuristic'ten gelen tam açıklama
                 
+                # --- YENİ: GÖRÜNÜR SEVİYELER (st.metric) ---
                 ti = row['target_info']
                 if ti.get('stop_loss') and ti.get('take_profit'):
-                    st.markdown(f"**Giriş:** `{ti['entry']:.6f}`   **Stop:** `{ti['stop_loss']:.6f}`   **Hedef:** `{ti['take_profit']:.6f}`")
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Giriş (Entry)", f"{ti['entry']:.5f}")
+                    c2.metric("Stop Loss", f"{ti['stop_loss']:.5f}")
+                    c3.metric("Hedef (Target)", f"{ti['take_profit']:.5f}")
                 
                 # Kayıt butonları
                 b1, b2, b3 = st.columns([1,1,1])
@@ -483,7 +514,7 @@ else:
                 if b2.button("❌ Hatalı Tahmin"):
                     st.warning("Hatalı olarak işaretlendi.")
                 if b3.button("📥 JSON İndir"):
-                    st.download_button("İndir", data=json.dumps(row, indent=2), file_name=f"{sel}_signal.json")
+                    st.download_button("İndir", data=json.dumps(row, indent=2, ensure_ascii=False), file_name=f"{sel}_signal.json")
                 
                 # Eski skorlama sisteminin katkılarını göster (opsiyonel)
                 st.markdown("#### Heuristic Gösterge Katkıları (Eski Sistem)")
