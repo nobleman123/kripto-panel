@@ -1,5 +1,5 @@
-# app.py (Eski adıyla main_app (2).py)
-# Streamlit MEXC contract sinyal uygulaması - full, mobile-friendly, stable TradingView embed
+# main_app.py
+# Streamlit MEXC contract sinyal uygulaması - (Yeni Hibrit AI Motoru entegre edildi)
 
 import streamlit as st
 import pandas as pd
@@ -7,8 +7,8 @@ import numpy as np
 import pandas_ta as ta
 import requests
 from datetime import datetime
-import ai_engine
-import streamlit.components.v1 as components  # <-- "removeChild" HATA ÇÖZÜMÜ İÇİN EKLENDİ
+import ai_engine  # <-- Yeni motorumuz
+import streamlit.components.v1 as components
 
 # optional plotly for indicator bars
 try:
@@ -94,6 +94,9 @@ def fetch_contract_funding_rate(symbol_mexc):
         return {'fundingRate': 0.0}
 
 # --------------- Indicators & scoring (robust) ----------------
+# ... (compute_indicators, nw_smooth, label_from_score, score_signals)
+# BU FONKSİYONLARDA DEĞİŞİKLİK YOK, YERİNDE KALABİLİR ...
+# (Kod tekrarını önlemek için buraya eklemiyorum, main_app.py dosyanızda kalsınlar)
 def nw_smooth(series, bandwidth=8):
     y = np.asarray(series)
     n = len(y)
@@ -235,12 +238,16 @@ def score_signals(latest, prev, funding, weights):
 
 # ---------------- Scan engine (cached) ----------------
 @st.cache_data(ttl=120)
-def run_scan(symbols, timeframes, weights, thresholds, top_n=100):
+def run_scan(symbols, timeframes, weights, thresholds, gemini_api_key, top_n=100): # <-- API KEY EKLENDİ
     results = []
     for sym in symbols[:top_n]:
         entry = {'symbol': sym, 'details': {}}
         best_score = None; best_tf = None; buy_count=0; strong_buy=0; sell_count=0
         mexc_sym = mexc_symbol_from(sym)
+        
+        # Sadece 1 kez funding rate çek
+        funding = fetch_contract_funding_rate(mexc_sym)
+        
         for tf in timeframes:
             interval = INTERVAL_MAP.get(tf)
             if interval is None:
@@ -251,41 +258,54 @@ def run_scan(symbols, timeframes, weights, thresholds, top_n=100):
             df_ind = compute_indicators(df)
             if df_ind is None or len(df_ind) < 3:
                 entry['details'][tf] = None; continue
+            
             latest = df_ind.iloc[-1]; prev = df_ind.iloc[-2]
-            funding = fetch_contract_funding_rate(mexc_sym)
+            
+            # Eski skorlama sistemi hala çalışıyor (Heuristic AI için girdi olarak)
             score, per_scores, reasons = score_signals(latest, prev, funding, weights)
             label = label_from_score(score, thresholds)
-            entry['details'][tf] = {'score': int(score), 'label': label, 'price': float(latest['close']),
-                                   'per_scores': per_scores, 'reasons': reasons,
-                                   'rsi14': float(latest.get('rsi14', np.nan)),
-                                   'macd_hist': float(latest.get('macd_hist', np.nan)),
-                                   'vol_osc': float(latest.get('vol_osc', np.nan)),
-                                   'atr14': float(latest.get('atr14', np.nan)),
-                                   'nw_slope': float(latest.get('nw_slope', np.nan))}
-            if best_score is None or score > best_score:
-                best_score = score; best_tf = tf
+            
+            # --- YENİ AI ANALİZ MOTORU ÇAĞRISI ---
+            indicators_snapshot = {
+                'score': int(score),
+                'price': float(latest['close']),
+                'rsi14': float(latest.get('rsi14', np.nan)),
+                'macd_hist': float(latest.get('macd_hist', np.nan)),
+                'vol_osc': float(latest.get('vol_osc', np.nan)),
+                'atr14': float(latest.get('atr14', np.nan)),
+                'nw_slope': float(latest.get('nw_slope', np.nan))
+            }
+            ai_analysis = ai_engine.get_ai_prediction(indicators_snapshot, api_key=gemini_api_key)
+            # --- BİTTİ ---
+
+            entry['details'][tf] = {
+                'score': int(score), 'label': label, 'price': float(latest['close']),
+                'per_scores': per_scores, 'reasons': reasons,
+                'ai_analysis': ai_analysis  # <-- Yeni AI analiz sonucunu buraya kaydet
+            }
+            
+            # En iyi skoru hala eski skora göre tutabiliriz veya AI güvenine göre
+            current_best_metric = ai_analysis.get('confidence', 0) if ai_analysis.get('signal') != 'NEUTRAL' else 0
+            if best_score is None or current_best_metric > best_score:
+                best_score = current_best_metric
+                best_tf = tf
+            
+            # Eski sayımlar (isteğe bağlı)
             if label in ['AL','GÜÇLÜ AL']: buy_count += 1
             if label == 'GÜÇLÜ AL': strong_buy += 1
             if label in ['SAT','GÜÇLÜ SAT']: sell_count += 1
+            
         entry['best_timeframe'] = best_tf
-        entry['best_score'] = int(best_score) if best_score is not None else None
+        entry['best_score'] = int(best_score) if best_score is not None else None # Artık bu 'en iyi güven' anlamına geliyor
         entry['buy_count'] = buy_count
         entry['strong_buy_count'] = strong_buy
         entry['sell_count'] = sell_count
         results.append(entry)
     return pd.DataFrame(results)
 
-# +++++++++++++ DÜZELTİLMİŞ TradingView GÖMME FONKSİYONU ("removeChild" HATA ÇÖZÜMÜ) +++++++++++++
+# ------------- GÜVENLİ TradingView GÖMME FONKSİYONU (Değişiklik Yok) ------------
 def show_tradingview(symbol: str, interval_tv: str, height: int = 480):
-    """
-    Güvenli TradingView yerleştirmesi (removeChild hatası çözümü):
-    - st.empty() ve session_state KULLANILMADAN, 
-    - st.components.v1.html kullanılarak izole bir iframe içinde yükler.
-    """
-    
-    # Widget'ın içindeki div için benzersiz bir ID
     uid = f"tv_widget_{symbol.replace('/','_')}_{interval_tv}"
-    
     tradingview_html = f"""
     <div class="tradingview-widget-container" style="height:{height}px; width:100%;">
       <div id="{uid}" style="height:100%; width:100%;"></div>
@@ -316,16 +336,14 @@ def show_tradingview(symbol: str, interval_tv: str, height: int = 480):
       </script>
     </div>
     """
-    
-    # st.components.v1.html kullanarak HTML'i güvenle render et
-    # Bu, onu bir iframe'e koyar ve DOM çakışmalarını önler.
     components.html(tradingview_html, height=height, scrolling=False)
-# +++++++++++++ DÜZELTİLMİŞ FONKSİYONUN SONU +++++++++++++
-
 
 # ---------------- UI ----------------
-st.title("🔥 MEXC Vadeli — Profesyonel Sinyal Paneli (Full)")
+st.title("🔥 MEXC Vadeli — Profesyonel Sinyal Paneli (Hibrit AI)")
 st.sidebar.header("Tarama Ayarları")
+
+# --- YENİ: GEMINI API ANAHTARI GİRDİSİ ---
+gemini_api_key = st.sidebar.text_input("Gemini API Anahtarı (Opsiyonel)", type="password", help="Daha gelişmiş analiz için Gemini API anahtarınızı girin.")
 
 mode = st.sidebar.selectbox("Sembol kaynağı", ["Top by volume (200)","Custom list"])
 if mode == "Custom list":
@@ -340,7 +358,9 @@ if not symbols:
 
 timeframes = st.sidebar.multiselect("Zaman dilimleri", options=ALL_TFS, default=DEFAULT_TFS)
 top_n = st.sidebar.slider("İlk N coin taransın", min_value=5, max_value=min(200,len(symbols)), value=min(50,len(symbols)))
-with st.sidebar.expander("Ağırlıklar"):
+
+# Eski ağırlıklar ve eşikler (Heuristic motor için hala gerekli)
+with st.sidebar.expander("Heuristic Ağırlıklar (Eski Sistem)"):
     w_ema = st.number_input("EMA", value=DEFAULT_WEIGHTS['ema'])
     w_macd = st.number_input("MACD", value=DEFAULT_WEIGHTS['macd'])
     w_rsi = st.number_input("RSI", value=DEFAULT_WEIGHTS['rsi'])
@@ -350,7 +370,7 @@ with st.sidebar.expander("Ağırlıklar"):
     w_funding = st.number_input("Funding", value=DEFAULT_WEIGHTS['funding'])
     w_nw = st.number_input("NW slope", value=DEFAULT_WEIGHTS['nw'])
 weights = {'ema':w_ema,'macd':w_macd,'rsi':w_rsi,'bb':w_bb,'adx':w_adx,'vol':w_vol,'funding':w_funding,'nw':w_nw}
-with st.sidebar.expander("Sinyal eşikleri"):
+with st.sidebar.expander("Heuristic Sinyal Eşikleri (Eski Sistem)"):
     strong_buy_t = st.slider("GÜÇLÜ AL ≥", 10, 100, 60)
     buy_t = st.slider("AL ≥", 0, 80, 20)
     sell_t = st.slider("SAT ≤", -80, 0, -20)
@@ -364,56 +384,67 @@ if 'selected_symbol' not in st.session_state: st.session_state.selected_symbol =
 if 'selected_tf' not in st.session_state: st.session_state.selected_tf = DEFAULT_TFS[0]
 
 if scan:
-    with st.spinner("Tarama çalışıyor. Bu bir kaç dakika alabilir..."):
-        st.session_state.scan_results = run_scan(symbols, timeframes, weights, thresholds, top_n=top_n)
+    spinner_msg = "Tarama çalışıyor (Heuristic Mod)..."
+    if gemini_api_key and ai_engine.GEMINI_AVAILABLE:
+        spinner_msg = "Tarama çalışıyor (Gemini AI Modu)... Bu biraz daha uzun sürebilir..."
+    
+    with st.spinner(spinner_msg):
+        st.session_state.scan_results = run_scan(symbols, timeframes, weights, thresholds, gemini_api_key, top_n=top_n)
         st.session_state.last_scan = datetime.utcnow()
 
 df = st.session_state.scan_results
 if df is None or df.empty:
     st.info("Henüz tarama yok. Yan panelden Tara / Yenile ile başlat.")
 else:
-    # Prepare AI predictions for selected snapshot per coin (best TF)
+    # --- YENİ: AI Analizlerini Hazırla ---
     ai_list = []
     for _, row in df.iterrows():
         best_tf = row.get('best_timeframe')
         details = row.get('details', {}) or {}
         snapshot = details.get(best_tf) if details else None
         if not snapshot: continue
-        indicators = {'score': snapshot.get('score'),
-                      'rsi14': snapshot.get('rsi14'),
-                      'macd_hist': snapshot.get('macd_hist'),
-                      'vol_osc': snapshot.get('vol_osc'),
-                      'atr14': snapshot.get('atr14'),
-                      'nw_slope': snapshot.get('nw_slope'),
-                      'price': snapshot.get('price')}
-        ai_expl = ai_engine.predict_probability(indicators)
-        entry_target = ai_engine.compute_entry_target_stop(price=indicators['price'], atr=indicators.get('atr14', None))
-        ai_list.append({'symbol': row['symbol'], 'best_score': row.get('best_score'), 'best_tf': best_tf,
-                        'label': snapshot.get('label'), 'price': indicators['price'], 'ai_prob': ai_expl['probability'],
-                        'ai_text': ai_expl['text'], 'indicators': indicators, 'target_info': entry_target,
-                        'per_scores': snapshot.get('per_scores'), 'reasons': snapshot.get('reasons', [])})
+        
+        ai_analysis = snapshot.get('ai_analysis')
+        if not ai_analysis: continue
+
+        ai_list.append({
+            'symbol': row['symbol'],
+            'best_tf': best_tf,
+            'price': snapshot.get('price'),
+            'ai_signal': ai_analysis.get('signal', 'NEUTRAL'),
+            'ai_confidence': ai_analysis.get('confidence', 0),
+            'ai_text': ai_analysis.get('explanation', 'Açıklama yok.'),
+            'target_info': ai_analysis, # entry, stop_loss, take_profit içerir
+            'per_scores': snapshot.get('per_scores'), # Eski skorlar
+            'reasons': snapshot.get('reasons', []) # Eski nedenler
+        })
     ai_df = pd.DataFrame(ai_list)
 
-    # Layout: left list, right detail (responsive)
+    # Layout
     left, right = st.columns([1.6, 2.4])
 
     with left:
-        st.markdown("### 🔎 Sinyal Listesi (filtreleyip tıklayın)")
-        filter_label = st.selectbox("Kategori", ["All","GÜÇLÜ AL","AL","SAT","GÜÇLÜ SAT","TUT"], index=0)
-        min_prob = st.slider("AI min olasılık", 0.0, 1.0, 0.35, step=0.05)
+        st.markdown("### 🔎 AI Sinyal Listesi (filtreleyip tıklayın)")
+        
+        # --- YENİ: Filtreler ---
+        filter_signal = st.selectbox("Sinyal Türü", ["All","LONG","SHORT","NEUTRAL"], index=0)
+        min_confidence = st.slider("AI Minimum Güven (%)", 0, 100, 50, step=5)
+        
         filtered = ai_df.copy()
-        if filter_label != "All": filtered = filtered[filtered['label'] == filter_label]
-        filtered = filtered[filtered['ai_prob'] >= min_prob]
-        # sort by ai_prob desc
-        filtered = filtered.sort_values(by='ai_prob', ascending=False)
+        if filter_signal != "All": filtered = filtered[filtered['ai_signal'] == filter_signal]
+        filtered = filtered[filtered['ai_confidence'] >= min_confidence]
+        
+        # Güvene göre sırala
+        filtered = filtered.sort_values(by='ai_confidence', ascending=False)
+        
         for _, r in filtered.head(120).iterrows():
             emoji = "⚪"
-            if r['label']=='GÜÇLÜ AL': emoji='🚀'
-            elif r['label']=='AL': emoji='🟢'
-            elif r['label']=='SAT' or r['label']=='GÜÇLÜ SAT': emoji='🔴'
+            if r['ai_signal']=='LONG': emoji='🚀'
+            elif r['ai_signal']=='SHORT': emoji='🔴'
+            
             cols = st.columns([0.6,2,1])
             cols[0].markdown(f"<div style='font-size:20px'>{emoji}</div>", unsafe_allow_html=True)
-            cols[1].markdown(f"**{r['symbol']}** •  {r['best_tf']}  \nSkor: {r['best_score']}  •  AI: {r['ai_prob']:.2f}")
+            cols[1].markdown(f"**{r['symbol']}** • {r['best_tf']} \nAI Sinyal: **{r['ai_signal']}** (%{r['ai_confidence']})")
             if cols[2].button("Detay", key=f"det_{r['symbol']}"):
                 st.session_state.selected_symbol = r['symbol']
                 st.session_state.selected_tf = r['best_tf']
@@ -422,55 +453,60 @@ else:
         st.markdown("### 📈 Seçili Coin Detayı")
         sel = st.session_state.selected_symbol or (ai_df.iloc[0]['symbol'] if not ai_df.empty else None)
         sel_tf = st.session_state.selected_tf or DEFAULT_TFS[0]
+        
         if sel is None:
             st.write("Listeden bir coin seçin.")
         else:
-            st.markdown(f"**{sel}** •  TF: {sel_tf}")
+            st.markdown(f"**{sel}** • TF: **{sel_tf}**")
             interval = TV_INTERVAL_MAP.get(sel_tf, '60')
             
-            # Düzeltilmiş, güvenli TradingView fonksiyonu burada çağrılıyor
+            # Güvenli TradingView Gömme
             show_tradingview(sel, interval, height=420)
             
-            # display AI info & target/stop
+            # --- YENİ: AI Analizini Göster ---
             row = next((x for x in ai_list if x['symbol']==sel), None)
             if row:
-                st.markdown("#### AI Tahmini")
-                st.write(row['ai_text'])
+                st.markdown("#### 🧠 AI Analizi ve Ticaret Planı")
+                st.markdown(row['ai_text']) # Artık bu, Gemini'den veya Heuristic'ten gelen tam açıklamayı içeriyor
+                
                 ti = row['target_info']
-                st.markdown(f"**Giriş:** {ti['entry']:.6f}   **Stop:** {ti['stop']:.6f}   **Hedef:** {ti['target']:.6f}")
-                # buttons: mark correct (save), export
+                if ti.get('stop_loss') and ti.get('take_profit'):
+                    st.markdown(f"**Giriş:** `{ti['entry']:.6f}`   **Stop:** `{ti['stop_loss']:.6f}`   **Hedef:** `{ti['take_profit']:.6f}`")
+                
+                # Kayıt butonları
                 b1, b2, b3 = st.columns([1,1,1])
                 if b1.button("✅ Tahmini Doğru İşaretle"):
-                    rec = {'symbol': sel, 'tf': row['best_tf'], 'entry': ti['entry'], 'stop': ti['stop'],
-                           'target': ti['target'], 'price_at_mark': row['price'], 'ai_prob': row['ai_prob'],
-                           'score': row['best_score'], 'timestamp': datetime.utcnow().isoformat()}
+                    rec = {'symbol': sel, 'tf': row['best_tf'], 
+                           'entry': ti['entry'], 'stop': ti['stop_loss'], 'target': ti['take_profit'],
+                           'price_at_mark': row['price'], 'ai_signal': row['ai_signal'], 'ai_confidence': row['ai_confidence'],
+                           'timestamp': datetime.utcnow().isoformat()}
                     ok = ai_engine.save_record(rec)
-                    if ok:
-                        st.success("Tahmin doğru olarak kaydedildi.")
-                    else:
-                        st.error("Kayıt başarısız.")
+                    if ok: st.success("Tahmin doğru olarak kaydedildi.")
+                    else: st.error("Kayıt başarısız.")
                 if b2.button("❌ Hatalı Tahmin"):
                     st.warning("Hatalı olarak işaretlendi.")
                 if b3.button("📥 JSON İndir"):
-                    st.download_button("İndir", data=str(row), file_name=f"{sel}_signal.json")
-                st.markdown("#### Gösterge Katkıları")
+                    st.download_button("İndir", data=json.dumps(row, indent=2), file_name=f"{sel}_signal.json")
+                
+                # Eski skorlama sisteminin katkılarını göster (opsiyonel)
+                st.markdown("#### Heuristic Gösterge Katkıları (Eski Sistem)")
                 per = row.get('per_scores', {})
-                if per:
+                if per and PLOTLY_AVAILABLE:
                     dfp = pd.DataFrame([{'indicator':k,'points':v} for k,v in per.items()])
-                    if PLOTLY_AVAILABLE:
-                        fig = px.bar(dfp.sort_values('points'), x='points', y='indicator', orientation='h', color='points', color_continuous_scale='RdYlGn')
-                        fig.update_layout(height=240, margin=dict(l=10,r=10,t=10,b=10), template='plotly_dark')
-                        st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.table(dfp.set_index('indicator'))
+                    fig = px.bar(dfp.sort_values('points'), x='points', y='indicator', orientation='h', color='points', color_continuous_scale='RdYlGn')
+                    fig.update_layout(height=240, margin=dict(l=10,r=10,t=10,b=10), template='plotly_dark')
+                    st.plotly_chart(fig, use_container_width=True)
+                elif per:
+                    st.table(pd.DataFrame([{'indicator':k,'points':v} for k,v in per.items()]).set_index('indicator'))
                 else:
-                    st.write("Gösterge verisi yok.")
-    # bottom: summary & records
+                    st.write("Heuristic skor verisi yok.")
+
+    # Özet metrikler
     st.markdown("---")
     cols = st.columns([1,1,1,1])
     cols[0].metric("Tarama coin", f"{len(df)}")
-    cols[1].metric("Toplam SB", f"{int(df['strong_buy_count'].sum()) if not df.empty else 0}")
-    cols[2].metric("Ortalama Skor", f"{int(df['best_score'].dropna().mean()) if not df['best_score'].dropna().empty else '-'}")
+    cols[1].metric("Toplam LONG Sinyal", f"{len(ai_df[ai_df['ai_signal'] == 'LONG'])}" if not ai_df.empty else 0)
+    cols[2].metric("Toplam SHORT Sinyal", f"{len(ai_df[ai_df['ai_signal'] == 'SHORT'])}" if not ai_df.empty else 0)
     cols[3].metric("Kayıtlı Doğru Tahmin", f"{len(ai_engine.load_records())}")
 
     st.markdown("### ✅ Doğru Tahminler (Arşiv)")
