@@ -1,4 +1,4 @@
-# main_app.py
+# app.py
 # Streamlit MEXC contract sinyal uygulaması - (Yeni Hibrit AI Motoru entegre edildi)
 
 import streamlit as st
@@ -94,9 +94,6 @@ def fetch_contract_funding_rate(symbol_mexc):
         return {'fundingRate': 0.0}
 
 # --------------- Indicators & scoring (robust) ----------------
-# ... (compute_indicators, nw_smooth, label_from_score, score_signals)
-# BU FONKSİYONLARDA DEĞİŞİKLİK YOK, YERİNDE KALABİLİR ...
-# (Kod tekrarını önlemek için buraya eklemiyorum, main_app.py dosyanızda kalsınlar)
 def nw_smooth(series, bandwidth=8):
     y = np.asarray(series)
     n = len(y)
@@ -238,7 +235,7 @@ def score_signals(latest, prev, funding, weights):
 
 # ---------------- Scan engine (cached) ----------------
 @st.cache_data(ttl=120)
-def run_scan(symbols, timeframes, weights, thresholds, gemini_api_key, top_n=100): # <-- API KEY EKLENDİ
+def run_scan(symbols, timeframes, weights, thresholds, gemini_api_key, top_n=100):
     results = []
     for sym in symbols[:top_n]:
         entry = {'symbol': sym, 'details': {}}
