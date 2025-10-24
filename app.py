@@ -1,5 +1,5 @@
 # app.py
-# Streamlit MEXC contract sinyal uygulaması - (v3.8 - Multiselect Fix & Quality)
+# Streamlit MEXC contract sinyal uygulaması - (v3.9 - TypeError Fix & Robustness)
 
 import streamlit as st
 import pandas as pd
@@ -24,36 +24,29 @@ st.set_page_config(page_title="MEXC Vadeli - Profesyonel Sinyal Paneli", layout=
 # --- Session State Başlatma ---
 # ... (Aynı kaldı) ...
 if 'scan_results' not in st.session_state: st.session_state.scan_results = pd.DataFrame()
-# ... (diğer state'ler) ...
+if 'selected_symbol' not in st.session_state: st.session_state.selected_symbol = None
+if 'selected_tf' not in st.session_state: st.session_state.selected_tf = '15m'
+if 'tracked_signals' not in st.session_state: st.session_state.tracked_signals = {}
+if 'last_scan_time' not in st.session_state: st.session_state.last_scan_time = None
 if 'active_tab' not in st.session_state: st.session_state.active_tab = "📊 Genel AI"
 
 # ---------------- CONFIG & CONSTANTS ----------------
-CONTRACT_BASE = "https://contract.mexc.com/api/v1"
-INTERVAL_MAP = {'1m':'Min1','5m':'Min5','15m':'Min15','30m':'Min30','1h':'Min60','4h':'Hour4','1d':'Day1'}
-TV_INTERVAL_MAP = {'1m':'1','5m':'5','15m':'15','30m':'30','1h':'60','4h':'240','1d':'D'}
-ALL_TFS = ['1m','5m','15m','30m','1h','4h','1d'] # Multiselect için seçenekler
-DEFAULT_TFS_REQUESTED = ['15m','1h','4h'] # İstenen varsayılanlar
-# --- Hata Düzeltmesi: Geçerli varsayılanları filtrele ---
-DEFAULT_TFS = [tf for tf in DEFAULT_TFS_REQUESTED if tf in ALL_TFS]
-# --- Düzeltme Sonu ---
-DEFAULT_WEIGHTS = {'ema':25,'macd':20,'rsi':15,'bb':10,'adx':0,'vol':10,'funding':30,'nw':8}
-SCALP_TFS = ['1m', '5m', '15m']; SWING_TFS = ['4h', '1d']
-EMA_TREND_LENGTH = ai_engine.EMA_TREND_LENGTH
-SPECTER_ATR_LENGTH = ai_engine.SPECTER_ATR_LENGTH
-MA_TYPES = ['EMA', 'SMA', 'SMMA', 'WMA', 'VWMA']
+# ... (Aynı kaldı) ...
+CONTRACT_BASE = "https://contract.mexc.com/api/v1"; INTERVAL_MAP = {...}; TV_INTERVAL_MAP = {...}; ALL_TFS = [...]; DEFAULT_TFS_REQUESTED = ['15m','1h','4h']; DEFAULT_TFS = [tf for tf in DEFAULT_TFS_REQUESTED if tf in ALL_TFS]; DEFAULT_WEIGHTS = {...}; SCALP_TFS = [...]; SWING_TFS = [...]; EMA_TREND_LENGTH = ai_engine.EMA_TREND_LENGTH; SPECTER_ATR_LENGTH = ai_engine.SPECTER_ATR_LENGTH; MA_TYPES = [...]
 
 # CSS
-st.markdown("""<style>...</style>""", unsafe_allow_html=True) # CSS aynı kaldı
+# ... (Aynı kaldı) ...
+st.markdown("""<style>...</style>""", unsafe_allow_html=True)
 
 # ---------------- API Helpers (Aynı kaldı) ----------------
-# ... (fetch_all_contract_symbols, fetch_json, get_top_contracts_by_volume, mexc_symbol_from, fetch_contract_klines, fetch_contract_funding_rate) ...
+# ... (fetch_all_contract_symbols, fetch_json, get_top_contracts_by_volume, mexc_symbol_from, fetch_contract_klines, fetch_contract_funding_rate - Aynı kaldı) ...
 @st.cache_data(ttl=timedelta(hours=1))
 def fetch_all_contract_symbols(): #...
     pass
 def fetch_json(url, params=None, timeout=15): #...
     pass
 @st.cache_data(ttl=timedelta(minutes=1))
-def get_top_contracts_by_volume(limit=200): #...
+def get_top_contracts_by_volume(limit=200): #... (içindeki vol fonksiyonu düzeltilmişti)
     pass
 def mexc_symbol_from(symbol: str) -> str: #...
     pass
@@ -65,6 +58,7 @@ def fetch_contract_funding_rate(symbol_mexc): #...
     pass
 
 # ---------------- Scan Engine (Aynı kaldı) ----------------
+# run_scan fonksiyonu önceki yanıttaki gibi kalacak
 def run_scan(symbols_to_scan, timeframes, weights, thresholds, gemini_api_key,
              vr_lookback, vr_confirm, vr_vol_multi, combo_adx_thresh,
              specter_ma_type, specter_ma_length):
@@ -91,48 +85,87 @@ gemini_api_key_ui = st.sidebar.text_input("Gemini API Anahtarı (Opsiyonel)", ty
 
 # --- Sidebar Ayarları ---
 st.sidebar.header("Tarama Ayarları")
-all_symbols_list = fetch_all_contract_symbols(); mode = st.sidebar.selectbox("Sembol Kaynağı", ["Top Hacim","Özel Liste"])
-symbols_to_scan_ui = [];
-if mode == "Özel Liste": selected_symbols_ui = st.sidebar.multiselect("Coinleri Seçin", options=all_symbols_list, default=["BTCUSDT", "ETHUSDT"]); symbols_to_scan_ui = selected_symbols_ui
-else: symbols_by_volume_list = get_top_contracts_by_volume(200); top_n_ui = st.sidebar.slider("İlk N Coin", min_value=5, max_value=len(symbols_by_volume_list), value=min(50, len(symbols_by_volume_list))); symbols_to_scan_ui = symbols_by_volume_list[:top_n_ui]
-if not symbols_to_scan_ui: st.sidebar.warning("Taranacak sembol seçilmedi."); st.stop()
+all_symbols_list = fetch_all_contract_symbols()
+mode = st.sidebar.selectbox("Sembol Kaynağı", ["Top Hacim","Özel Liste"])
 
-# --- Zaman Dilimleri (Hata düzeltmesi uygulandı) ---
-# options=ALL_TFS ve default=DEFAULT_TFS doğrudan kullanılıyor, DEFAULT_TFS yukarıda filtrelendi.
+symbols_to_scan_ui = []
+if mode == "Özel Liste":
+    selected_symbols_ui = st.sidebar.multiselect("Coinleri Seçin", options=all_symbols_list, default=["BTCUSDT", "ETHUSDT"])
+    symbols_to_scan_ui = selected_symbols_ui
+else: # Top Hacim
+    symbols_by_volume_list = get_top_contracts_by_volume(200)
+    # --- TypeError Düzeltmesi ---
+    if not symbols_by_volume_list:
+        st.sidebar.error("MEXC'den hacim verisi alınamadı veya hiç vadeli işlem yok.")
+        logging.error("get_top_contracts_by_volume boş liste döndürdü.")
+        st.stop() # Hata durumunda durdur
+    else:
+        # Slider değerlerini güvenli hale getir
+        max_symbols = len(symbols_by_volume_list)
+        min_val_slider = 5
+        max_val_slider = max(min_val_slider, max_symbols) # max_value en az min_value olmalı
+        default_val_slider = max(min_val_slider, min(50, max_symbols)) # value, [min_value, max_value] arasında kalmalı
+
+        top_n_ui = st.sidebar.slider(
+            "İlk N Coin",
+            min_value=min_val_slider,
+            max_value=max_val_slider, # Güvenli max değer
+            value=default_val_slider # Güvenli varsayılan değer
+        )
+        symbols_to_scan_ui = symbols_by_volume_list[:top_n_ui]
+    # --- Düzeltme Sonu ---
+
+
+if not symbols_to_scan_ui: st.sidebar.warning("Taranacak sembol seçilmedi."); st.stop() # Tekrar kontrol
+
 timeframes_ui = st.sidebar.multiselect("Zaman Dilimleri", options=ALL_TFS, default=DEFAULT_TFS, key="timeframes_multiselect")
 if not timeframes_ui: st.sidebar.warning("Zaman dilimi seçin."); st.stop()
-# --- Düzeltme Sonu ---
-
 
 # ... (Specter, Hacim, Strateji, Algoritma ayarları expander'ları aynı kaldı) ...
-with st.sidebar.expander("☁️ Specter Trend Ayarları"): specter_ma_type_ui=...; specter_ma_length_ui=...
-with st.sidebar.expander("📈 Hacim Teyitli Dönüş Ayarları"): vr_lookback_ui=...; vr_confirm_ui=...; vr_vol_multi_ui=...
-with st.sidebar.expander("💡 Strateji Kombinasyon Ayarları"): combo_adx_thresh_ui=...
+with st.sidebar.expander("☁️ Specter Trend Ayarları"): specter_ma_type_ui=st.selectbox(...); specter_ma_length_ui=st.slider(...)
+with st.sidebar.expander("📈 Hacim Teyitli Dönüş Ayarları"): vr_lookback_ui=st.slider(...); vr_confirm_ui=st.slider(...); vr_vol_multi_ui=st.slider(...)
+with st.sidebar.expander("💡 Strateji Kombinasyon Ayarları"): combo_adx_thresh_ui=st.slider(...)
 with st.sidebar.expander("⚙️ Sistem Algoritması Ayarları (Eski)"): weights_ui={...}; thresholds_ui=(...)
+
 
 # --- Tarama Butonu ---
 scan = st.sidebar.button("🔍 Tara / Yenile")
 
 if scan:
     # ... (Tarama başlatma mantığı ve try/except aynı kaldı) ...
-    with st.spinner("Tarama çalışıyor..."):
+    spinner_msg = "Tarama çalışıyor...";
+    with st.spinner(spinner_msg):
         try:
-             st.session_state.scan_results = run_scan(...) # Parametreler aynı
-             # ... (Sonrası aynı) ...
+             scan_start_time = time.time()
+             # Önceki tarama sonuçlarını temizle (isteğe bağlı)
+             # st.session_state.scan_results = pd.DataFrame()
+             st.session_state.scan_results = run_scan(
+                 symbols_to_scan_ui, timeframes_ui, weights_ui, thresholds_ui,
+                 gemini_api_key_ui, vr_lookback_ui, vr_confirm_ui, vr_vol_multi_ui,
+                 combo_adx_thresh_ui, specter_ma_type_ui, specter_ma_length_ui
+             )
+             scan_duration = time.time() - scan_start_time
+             logging.info(f"Tarama tamamlandı. Süre: {scan_duration:.2f}s. {len(st.session_state.scan_results)} sonuç.")
+             st.session_state.last_scan_time = datetime.now()
+             st.session_state.selected_symbol = None
+             # st.experimental_rerun() # Sayfayı yenilemek bazen sorun çıkarabilir, kaldırdık. State zaten güncellendi.
         except Exception as e:
-             # ... (Hata yönetimi aynı) ...
-             logging.error(...)
-             st.error(...)
-             st.session_state.scan_results = pd.DataFrame()
+             logging.error(f"Beklenmedik tarama hatası (ana blok): {e}", exc_info=True)
+             st.error(f"Tarama sırasında bir hata oluştu. Detaylar için logları kontrol edin.")
+             # st.exception(e) # Kullanıcıya tam hatayı gösterme
+             st.session_state.scan_results = pd.DataFrame() # Hata durumunda state'i boşalt
 
 
 # --- Sonuçları Göster ---
-df_results = st.session_state.scan_results
+df_results = st.session_state.scan_results # State'den al
+
 if st.session_state.last_scan_time: st.sidebar.caption(f"Son Tarama: {st.session_state.last_scan_time.strftime('%H:%M:%S')}")
 
 if df_results is None or df_results.empty:
-    # ... (Boş sonuç mesajı aynı kaldı) ...
-    pass
+    if st.session_state.last_scan_time: # Eğer tarama yapıldıysa ama sonuç yoksa
+        st.warning("Tarama tamamlandı ancak seçili kriterlere uygun coin bulunamadı veya verilerde sorun oluştu.")
+    else: # Henüz tarama yapılmadıysa
+        st.info("Henüz tarama yapılmadı. Lütfen yan panelden ayarları yapılandırıp 'Tara / Yenile' butonuna basın.")
 else:
     # --- Veri Hazırlama (Aynı kaldı) ---
     general_ai_list = []; volume_reversal_list = []; strategy_combo_list = []; specter_trend_list = []
@@ -146,12 +179,16 @@ else:
 
     # --- Sekme İçerikleri (Aynı kaldı) ---
     with tab1: # Genel AI ...
+        # ... (Filtreleme, Liste, Detay) ...
         pass
     with tab2: # Hacim Dönüş ...
+        # ... (Filtreleme, Liste, Detay) ...
         pass
     with tab3: # Strateji Komb. ...
+        # ... (Filtreleme, Liste, Detay) ...
         pass
     with tab4: # Specter Trend ...
+        # ... (Filtreleme, Liste, Detay) ...
         pass
 
     # --- Takip Edilen Sinyaller (Aynı kaldı) ---
@@ -160,4 +197,4 @@ else:
     # --- Özet Metrikler ve Kayıtlı Tahminler (Aynı kaldı) ---
     # ... (Gösterim aynı) ...
 
-st.caption("⚠️ Uyarı: Bu araç yalnızca eğitim ve deneme amaçlıdır. Yatırım tavsiye değildir.")
+st.caption("⚠️ Uyarı: Bu araç yalnızca eğitim ve deneme amaçlıdır. Yatırım tavsiyesi değildir.")
