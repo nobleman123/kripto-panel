@@ -63,15 +63,14 @@ def get_heuristic_analysis(indicators: Dict[str, Any]) -> Dict[str, Any]:
     short_score = 0
     explanation_points = []
     
-    # Ağırlıklar (Bu değerleri main_app'ten de alabilirsiniz, şimdilik burada sabit)
     weights = {
         'rsi_extreme': 25,
         'rsi_trend': 15,
-        'macd_cross': 30,
         'macd_trend': 15,
         'nw_slope': 30,
         'vol_spike': 10,
-        'score_bonus': 20
+        'score_bonus': 20,
+        'bb_reversal': 20  # <-- YENİ EKLENDİ
     }
 
     # 1. RSI Analizi
@@ -105,13 +104,11 @@ def get_heuristic_analysis(indicators: Dict[str, Any]) -> Dict[str, Any]:
         explanation_points.append(f"Trend Eğimi({nw_slope:.2f}) pozitif, yükseliş trendi (+{weights['nw_slope']}p LONG).")
     elif nw_slope < 0:
         short_score += weights['nw_slope']
-        # --- BURASI DÜZELTİLDİ ---
         explanation_points.append(f"Trend Eğimi({nw_slope:.2f}) negatif, düşüş trendi (+{weights['nw_slope']}p SHORT).")
 
     # 4. Hacim Analizi
     vol_osc = indicators.get('vol_osc', 0.0)
     if vol_osc > 0.5:
-        # Yüksek hacim genelde mevcut trendi doğrular
         if long_score > short_score: long_score += weights['vol_spike']
         if short_score > long_score: short_score += weights['vol_spike']
         explanation_points.append(f"Hacim Osilatörü({vol_osc:.2f}) yüksek, trendi doğruluyor (+{weights['vol_spike']}p).")
@@ -124,6 +121,18 @@ def get_heuristic_analysis(indicators: Dict[str, Any]) -> Dict[str, Any]:
     elif score < -40:
         short_score += weights['score_bonus']
         explanation_points.append(f"Genel Puan({score}) güçlü SAT sinyali veriyor (+{weights['score_bonus']}p SHORT).")
+
+    # 6. Bollinger Bantları Analizi (Reversal) - YENİ EKLENDİ
+    price = indicators.get('price', 0.0)
+    bb_upper = indicators.get('bb_upper', 0.0)
+    bb_lower = indicators.get('bb_lower', 0.0)
+    if price > 0 and bb_upper > 0 and price > bb_upper:
+        short_score += weights['bb_reversal']
+        explanation_points.append(f"Fiyat({price:.2f}) Üst Bollinger Bandını({bb_upper:.2f}) aştı, geri çekilme (SHORT) beklentisi (+{weights['bb_reversal']}p SHORT).")
+    elif price > 0 and bb_lower > 0 and price < bb_lower:
+        long_score += weights['bb_reversal']
+        explanation_points.append(f"Fiyat({price:.2f}) Alt Bollinger Bandını({bb_lower:.2f}) kırdı, tepki (LONG) beklentisi (+{weights['bb_reversal']}p LONG).")
+
 
     # Sinyal Kararı
     signal = "NEUTRAL"
@@ -171,9 +180,10 @@ def get_gemini_analysis(indicators: Dict[str, Any], api_key: str) -> Dict[str, A
     # Gemini'ye gönderilecek ham veriler
     data_context = json.dumps(indicators, indent=2)
     
+    # --- YENİ GELİŞTİRİLMİŞ PROMPT ---
     prompt = f"""
-    Sen usta bir kripto para vadeli işlem teknik analistisin.
-    Görevin, aşağıdaki JSON formatındaki indikatör anlık görüntüsünü analiz etmek ve profesyonel bir ticaret planı oluşturmaktır.
+    Sen usta bir kantitatif (quantitative) kripto para analistisin.
+    Görevin, aşağıdaki JSON formatındaki indikatör anlık görüntüsünü analiz etmek ve bilimsel bir ticaret planı oluşturmaktır.
 
     İNDİKATÖR VERİLERİ:
     ```json
@@ -182,18 +192,20 @@ def get_gemini_analysis(indicators: Dict[str, Any], api_key: str) -> Dict[str, A
 
     İNDİKATÖR AÇIKLAMALARI:
     - 'price': Mevcut Fiyat
-    - 'score': Diğer indikatörlerden gelen ön-hesaplanmış genel puan (-100 SAT, +100 AL)
-    - 'rsi14': RSI (14) değeri (30 altı aşırı satım, 70 üstü aşırı alım)
-    - 'macd_hist': MACD Histogram değeri (pozitif = bullish, negatif = bearish momentum)
-    - 'vol_osc': Hacim Osilatörü (pozitif değerler ortalamanın üstünde hacim artışı)
-    - 'atr14': ATR (14) - Volatilite göstergesi
-    - 'nw_slope': Nadaraya-Watson (Trend) Eğimi (pozitif = yükseliş, negatif = düşüş trendi)
+    - 'score': Ön-hesaplanmış genel puan (-100 SAT, +100 AL)
+    - 'rsi14': RSI (14) (Momentum: 30 altı aşırı satım, 70 üstü aşırı alım)
+    - 'macd_hist': MACD Histogram (Momentum: pozitif = bullish, negatif = bearish)
+    - 'vol_osc': Hacim Osilatörü (Yüksek pozitif = güçlü trend onayı)
+    - 'atr14': ATR (14) (Volatilite - SADECE Stop-loss hesaplaması için kullanılır)
+    - 'nw_slope': Nadaraya-Watson (ANA TREND - En önemli gösterge. Pozitif = yükseliş, negatif = düşüş)
+    - 'bb_upper' / 'bb_lower': Bollinger Bantları (Fiyatın bu bantların dışına çıkması, bir geri çekilme/reversal sinyali olabilir veya hedeftir)
 
     TALEPLER:
-    1.  Verileri analiz ederek net bir SİNYAL belirle: "LONG", "SHORT" veya "NEUTRAL".
-    2.  Bu sinyale olan GÜVENİNİ 0 ile 100 arasında bir puanla belirt.
-    3.  Detaylı bir AÇIKLAMA yaz. Hangi indikatörlerin bu kararı en çok etkilediğini, piyasa duyarlılığının ne olduğunu (momentum, trend, volatilite) ve riskleri açıkla.
-    4.  'price' ve 'atr14' değerlerini kullanarak bu sinyal için profesyonel bir GİRİŞ (entry), STOP LOSS (stop_loss) ve HEDEF KÂR (take_profit) seviyesi belirle. (Risk/Ödül oranı yaklaşık 1:2 olmalı).
+    1.  Ana trendi (`nw_slope`) ve momentumu (`rsi14`, `macd_hist`) analiz ederek net bir SİNYAL belirle: "LONG", "SHORT" veya "NEUTRAL".
+    2.  Trendin tersine (counter-trend) işlem açmaktan kaçın. Sinyalin, ana trend (`nw_slope`) yönünde olduğundan emin ol. (Örn: `nw_slope` pozitif ise, sadece "LONG" veya "NEUTRAL" sinyali ver).
+    3.  Bu sinyale olan GÜVENİNİ 0 ile 100 arasında bir puanla belirt.
+    4.  Detaylı bir AÇIKLAMA yaz. Kararını (Confirmation) ve karşıt görüşleri (Contradictions) belirterek mantıksal bir gerekçe sun.
+    5.  `price`, `atr14` ve `bb_upper`/`bb_lower` değerlerini kullanarak profesyonel bir GİRİŞ (entry), STOP LOSS (stop_loss) ve HEDEF KÂR (take_profit) seviyesi belirle. (Stop `atr14`'e, Hedef karşıt Bollinger Bandına veya 1:2 R/R oranına göre belirlenmeli).
 
     CEVAP FORMATI:
     SADECE aşağıdaki yapıya sahip bir JSON nesnesi döndür:
@@ -220,13 +232,12 @@ def get_gemini_analysis(indicators: Dict[str, Any], api_key: str) -> Dict[str, A
         return ai_plan
         
     except Exception as e:
-        # Hata durumunda, Gemini'den gelen tam yanıtı logla (eğer varsa)
         raw_response_text = "Yanıt yok"
         if 'response' in locals() and hasattr(response, 'text'):
             raw_response_text = response.text
         logging.error(f"Gemini API Hatası: {e}\nYanıt: {raw_response_text}")
-        raise ConnectionError(f"Gemini API ile iletişim kurulamadı veya yanıt ayrıştırılamadı. Hata: {e}")
-
+        # Hata durumunda heuristic'e dönmek yerine hatayı göster
+        return get_heuristic_analysis(indicators) # Hata olursa heuristic'e dön
 
 def get_ai_prediction(indicators: Dict[str, Any], api_key: str = None) -> Dict[str, Any]:
     """
@@ -238,10 +249,8 @@ def get_ai_prediction(indicators: Dict[str, Any], api_key: str = None) -> Dict[s
             return get_gemini_analysis(indicators, api_key)
         except Exception as e:
             logging.warning(f"Gemini analizi başarısız oldu, heuristic moda geçiliyor: {e}")
-            # Gemini başarısız olursa heuristic'e geri dön
             return get_heuristic_analysis(indicators)
     else:
-        # API anahtarı yoksa veya kütüphane yüklü değilse
         return get_heuristic_analysis(indicators)
 
 # --- Kayıt Fonksiyonları (Değişiklik Yok) ---
