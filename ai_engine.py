@@ -105,7 +105,8 @@ def get_heuristic_analysis(indicators: Dict[str, Any]) -> Dict[str, Any]:
         explanation_points.append(f"Trend Eğimi({nw_slope:.2f}) pozitif, yükseliş trendi (+{weights['nw_slope']}p LONG).")
     elif nw_slope < 0:
         short_score += weights['nw_slope']
-        explanation_points.append(f"Trend Eğimi({nw_slope:.2f}) negatif, düşüş trendi (+_weights['nw_slope']}p SHORT).")
+        # --- BURASI DÜZELTİLDİ ---
+        explanation_points.append(f"Trend Eğimi({nw_slope:.2f}) negatif, düşüş trendi (+{weights['nw_slope']}p SHORT).")
 
     # 4. Hacim Analizi
     vol_osc = indicators.get('vol_osc', 0.0)
@@ -219,7 +220,11 @@ def get_gemini_analysis(indicators: Dict[str, Any], api_key: str) -> Dict[str, A
         return ai_plan
         
     except Exception as e:
-        logging.error(f"Gemini API Hatası: {e}\nYanıt: {response.text if 'response' in locals() else 'Yanıt yok'}")
+        # Hata durumunda, Gemini'den gelen tam yanıtı logla (eğer varsa)
+        raw_response_text = "Yanıt yok"
+        if 'response' in locals() and hasattr(response, 'text'):
+            raw_response_text = response.text
+        logging.error(f"Gemini API Hatası: {e}\nYanıt: {raw_response_text}")
         raise ConnectionError(f"Gemini API ile iletişim kurulamadı veya yanıt ayrıştırılamadı. Hata: {e}")
 
 
