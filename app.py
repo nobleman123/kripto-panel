@@ -1,362 +1,425 @@
-# app.py
 import streamlit as st
 import pandas as pd
-import numpy as np
-import requests
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import ta
-import time
+import pandas_ta as ta
+import random
 from datetime import datetime
-import warnings
-warnings.filterwarnings('ignore')
+import time
+import requests
+import json
 
-# Sayfa ayarı - daha basit konfigürasyon
-st.set_page_config(
-    page_title="Kripto Sinyal Sistemi",
-    page_icon="🚀",
-    layout="wide"
-)
+# --- Configuration and Initialization ---
+# Initialize session state for tracking signals (FIXED: Must use 'not in' to initialize only once)
+if 'saved_signals' not in st.session_state:
+    st.session_state.saved_signals = []
 
-# Basitleştirilmiş CSS
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.5rem;
-        color: #1f77b4;
-        text-align: center;
-        margin-bottom: 1rem;
-    }
-    .signal-buy {
-        background-color: #d4edda;
-        border-radius: 5px;
-        padding: 8px;
-        color: #155724;
-    }
-    .signal-sell {
-        background-color: #f8d7da;
-        border-radius: 5px;
-        padding: 8px;
-        color: #721c24;
-    }
-    .signal-hold {
-        background-color: #fff3cd;
-        border-radius: 5px;
-        padding: 8px;
-        color: #856404;
-    }
-</style>
-""", unsafe_allow_html=True)
+if 'market_summary' not in st.session_state:
+    st.session_state.market_summary = None
 
-# Session state initialization
-if 'last_analysis' not in st.session_state:
-    st.session_state.last_analysis = None
-if 'analysis_data' not in st.session_state:
-    st.session_state.analysis_data = None
+SYMBOLS = ["BTC/USDT", "ETH/USDT", "XRP/USDT", "LTC/USDT", "ADA/USDT", "SOL/USDT", "DOT/USDT", "AVAX/USDT"]
+SCAN_RESULTS_KEY = 'scan_results'
 
-class CryptoSignalApp:
-    def __init__(self):
-        self.exchanges = {
-            'binance': 'Binance',
-            'mexc': 'MEXC'
+# Gemini API Configuration (Leave as empty string, Canvas will provide the key)
+API_KEY = "" 
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent"
+IMAGEN_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict"
+
+st.set_page_config(layout="wide", page_title="AI Destekli Kripto Sinyal Paneli")
+
+# --- Gemini API Functions ---
+
+def call_gemini_api(prompt, use_search=False, system_instruction=""):
+    """
+    Makes a POST request to the Gemini API with exponential backoff.
+    """
+    url = f"{GEMINI_API_URL}?key={API_KEY}"
+    
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "systemInstruction": {"parts": [{"text": system_instruction}]},
+    }
+    
+    if use_search:
+        payload["tools"] = [{"google_search": {}}]
+
+    headers = {'Content-Type': 'application/json'}
+    
+    # Simple retry mechanism (exponential backoff not fully implemented here for brevity, 
+    # but essential for production)
+    for attempt in range(3):
+        try:
+            response = requests.post(url, headers=headers, data=json.dumps(payload))
+            response.raise_for_status()
+            
+            result = response.json()
+            candidate = result.get('candidates', [None])[0]
+            
+            if candidate and candidate.get('content') and candidate['content'].get('parts'):
+                text = candidate['content']['parts'][0]['text']
+                return text
+            
+            return "API'den geçerli yanıt alınamadı."
+        
+        except requests.exceptions.HTTPError as e:
+            if response.status_code == 429 and attempt < 2:
+                time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+                continue
+            return f"API Hatası ({response.status_code}): {e}. Gemini çağrısı başarısız oldu."
+        except Exception as e:
+            return f"İstekte hata: {e}"
+            
+    return "API'ye erişim sağlanamadı."
+
+
+def generate_market_summary(strong_signals_df):
+    """ Generates a market summary based on strong signals using Gemini. """
+    st.toast("✨ Piyasa Özeti Oluşturuluyor...")
+    
+    if strong_signals_df.empty:
+        summary_text = "Şu anda güçlü bir sinyal bulunamadı, bu nedenle piyasa özeti oluşturulamıyor."
+        st.session_state.market_summary = summary_text
+        return
+
+    # Prepare data for the prompt
+    signal_data = strong_signals_df[['Sembol', 'Sinyal', 'Açıklama']].to_markdown(index=False)
+    
+    system_prompt = (
+        "Sen deneyimli bir kripto piyasası analistisin. Verilen güçlü teknik sinyallere ve genel piyasa "
+        "trendlerine (Google Search'ten gelen güncel bilgilere dayanarak) odaklanarak Türkçe, 150 kelimeyi geçmeyen, "
+        "kısa, nesnel ve profesyonel bir piyasa özeti yaz."
+    )
+    
+    user_query = (
+        "Aşağıdaki teknik analiz tarama sonuçlarını ve Google Arama'dan gelen güncel piyasa verilerini kullanarak genel bir "
+        "kripto piyasası özeti oluştur:\n\n"
+        f"Güçlü Sinyaller:\n{signal_data}"
+    )
+    
+    result = call_gemini_api(user_query, use_search=True, system_instruction=system_prompt)
+    st.session_state.market_summary = result
+    st.toast("✨ Piyasa Özeti Tamamlandı!", icon='✅')
+
+
+def get_signal_context(symbol, signal_type, entry_price):
+    """ Generates a contextual explanation and risk analysis for a specific symbol using Gemini. """
+    
+    system_prompt = (
+        "Sen profesyonel bir finansal risk uzmanısın. Kullanıcının takip listesine eklediği kripto para birimi sinyali "
+        "hakkında Google Search'ten gelen güncel haberleri ve risk faktörlerini analiz et. Türkçe, 3-4 cümlelik, "
+        "sembolün temel durumu, olası riskleri ve sinyali destekleyen/çürüten güncel olayları özetleyen bir metin oluştur."
+    )
+    
+    user_query = (
+        f"Sembol: {symbol}, Sinyal Tipi: {signal_type}, Giriş Fiyatı: {entry_price}. "
+        f"Bu sinyalin geçerliliğini ve bu sembolle ilişkili güncel piyasa risklerini (düzenleyici haberler, teknolojik gelişmeler, önemli ortaklıklar vb.) analiz et."
+    )
+    
+    result = call_gemini_api(user_query, use_search=True, system_instruction=system_prompt)
+    return result
+
+# --- Core Financial Logic (Reused) ---
+
+def fetch_mock_data(symbol, period=200):
+    """
+    Simulates fetching OHLCV data.
+    In a real app, this would be replaced by an API call (e.g., ccxt).
+    """
+    base_price = 1000 + random.randint(-50, 50)
+    data = []
+    
+    for i in range(period):
+        open_p = base_price * (1 + random.uniform(-0.01, 0.01))
+        close_p = open_p * (1 + random.uniform(-0.01, 0.01))
+        high_p = max(open_p, close_p) * (1 + random.uniform(0.001, 0.005))
+        low_p = min(open_p, close_p) * (1 - random.uniform(0.001, 0.005))
+        volume = 100000 + random.randint(-50000, 50000)
+        
+        data.append([
+            datetime.now() - pd.Timedelta(days=period - 1 - i),
+            open_p, high_p, low_p, close_p, volume
+        ])
+        base_price = close_p
+    
+    df = pd.DataFrame(data, columns=['Date', 'Open', 'High', 'Low', 'Close', 'Volume'])
+    df.set_index('Date', inplace=True)
+    return df
+
+@st.cache_data
+def generate_composite_signal(df):
+    """
+    Generates 'Güçlü Al' or 'Güçlü Sat' signal based on multiple indicators (RSI, MACD, BBands).
+    """
+    if df.empty:
+        return {"signal": "Nötr", "reason": "Veri yok"}
+
+    # Indicators calculation
+    df.ta.rsi(append=True)
+    last_rsi = df['RSI_14'].iloc[-1]
+    df.ta.macd(append=True)
+    last_macd = df['MACD_12_26_9'].iloc[-1]
+    
+    # BBands Calculation and Dynamic Name Extraction
+    bbands_output = df.ta.bbands(close=df['Close'], length=20, std=2.0, append=True)
+    
+    # Varsayılan adlar: BBL_20_2.0, BBU_20_2.0
+    lower_band_col = f"BBL_{20}_2.0"
+    upper_band_col = f"BBU_{20}_2.0"
+    
+    # Kontrol et ve verileri çek
+    try:
+        last_close = df['Close'].iloc[-1]
+        last_lower_band = df[lower_band_col].iloc[-1]
+        last_upper_band = df[upper_band_col].iloc[-1]
+    except KeyError:
+        # Eğer adlar yanlışsa, BBands'in oluşturduğu sütunları bulmaya çalış
+        bbands_cols = [col for col in df.columns if col.startswith('BBL_')]
+        if not bbands_cols:
+             return {"signal": "Hata", "reason": "BBands sütunları bulunamadı.", "price": df['Close'].iloc[-1] if not df.empty else 0}
+        
+        lower_band_col = bbands_cols[0]
+        upper_band_col = lower_band_col.replace('BBL', 'BBU')
+        
+        last_lower_band = df[lower_band_col].iloc[-1]
+        last_upper_band = df[upper_band_col].iloc[-1]
+
+
+    # --- Signal Algorithm (Advanced Logic) ---
+    is_oversold = last_rsi < 30
+    is_macd_positive = last_macd > 0
+    is_near_lower_band = last_close <= last_lower_band * 1.01
+
+    if is_oversold and is_macd_positive and is_near_lower_band:
+        return {
+            "signal": "GÜÇLÜ AL", 
+            "reason": f"RSI({last_rsi:.2f}) aşırı satım bölgesinde ve fiyat alt banda yakın. MACD yükseliş gösteriyor.", 
+            "price": last_close
         }
-        
-    def get_high_volume_pairs(self, exchange='binance', volume_threshold=1000000, limit=20):
-        """Yüksek hacimli çiftleri getir - limiti düşürdüm"""
-        try:
-            if exchange == 'binance':
-                url = "https://api.binance.com/api/v3/ticker/24hr"
-            elif exchange == 'mexc':
-                url = "https://api.mexc.com/api/v3/ticker/24hr"
-            else:
-                return []
-            
-            response = requests.get(url, timeout=10)
-            tickers = response.json()
-            high_volume_pairs = []
-            
-            for ticker in tickers:
-                if isinstance(ticker, dict) and 'symbol' in ticker and ticker['symbol'].endswith('USDT'):
-                    try:
-                        volume = float(ticker.get('quoteVolume', 0))
-                        if volume > volume_threshold:
-                            high_volume_pairs.append({
-                                'symbol': ticker['symbol'],
-                                'volume': volume,
-                                'price': float(ticker.get('lastPrice', 0)),
-                                'change': float(ticker.get('priceChangePercent', 0))
-                            })
-                    except (ValueError, TypeError):
-                        continue
-            
-            # Hacime göre sırala ve limit uygula
-            high_volume_pairs.sort(key=lambda x: x['volume'], reverse=True)
-            return high_volume_pairs[:limit]
-            
-        except Exception as e:
-            st.error(f"Veri çekme hatası: {e}")
-            return []
     
-    def fetch_ohlcv_data(self, symbol, exchange='binance', interval='1h', limit=50):  # Limit düşürüldü
-        """OHLCV verilerini getir"""
-        try:
-            if exchange == 'binance':
-                url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-            elif exchange == 'mexc':
-                url = f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-            else:
-                return pd.DataFrame()
-            
-            response = requests.get(url, timeout=10)
-            data = response.json()
-            
-            if not isinstance(data, list):
-                return pd.DataFrame()
-            
-            df = pd.DataFrame(data, columns=[
-                'timestamp', 'open', 'high', 'low', 'close', 'volume',
-                'close_time', 'quote_volume', 'trades', 'taker_buy_base',
-                'taker_buy_quote', 'ignore'
-            ])
-            
-            # Veri tiplerini dönüştür
-            numeric_columns = ['open', 'high', 'low', 'close', 'volume']
-            for col in numeric_columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-            
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', errors='coerce')
-            df = df.dropna()
-            return df
-            
-        except Exception as e:
-            return pd.DataFrame()
-    
-    def calculate_all_indicators(self, df):
-        """8 temel göstergeyi hesapla"""
-        if df.empty or len(df) < 20:  # Minimum veri sayısını düşürdüm
-            return {}
-        
-        close = df['close']
-        high = df['high']
-        low = df['low']
-        volume = df['volume']
-        
-        indicators = {}
-        
-        try:
-            # 1. RSI
-            indicators['rsi'] = ta.momentum.RSIIndicator(close=close, window=14).rsi().iloc[-1]
-            
-            # 2. MACD
-            macd = ta.trend.MACD(close=close)
-            indicators['macd'] = macd.macd().iloc[-1]
-            indicators['macd_signal'] = macd.macd_signal().iloc[-1]
-            
-            # 3. Bollinger Bantları
-            bb = ta.volatility.BollingerBands(close=close, window=20, window_dev=2)
-            current_price = close.iloc[-1]
-            bb_upper = bb.bollinger_hband().iloc[-1]
-            bb_lower = bb.bollinger_lband().iloc[-1]
-            if bb_upper != bb_lower:
-                bb_position = (current_price - bb_lower) / (bb_upper - bb_lower)
-            else:
-                bb_position = 0.5
-            indicators['bb_position'] = bb_position
-            
-            # 4. EMA'lar
-            indicators['ema_9'] = ta.trend.EMAIndicator(close=close, window=9).ema_indicator().iloc[-1]
-            indicators['ema_21'] = ta.trend.EMAIndicator(close=close, window=21).ema_indicator().iloc[-1]
-            
-            # 5. VWAP (Basitleştirilmiş)
-            typical_price = (high + low + close) / 3
-            vwap = (typical_price * volume).cumsum() / volume.cumsum()
-            indicators['vwap'] = vwap.iloc[-1]
-            
-            # 6. Stochastic RSI
-            stoch_rsi = ta.momentum.StochRSIIndicator(close=close)
-            stoch_rsi_val = stoch_rsi.stochrsi().iloc[-1]
-            indicators['stoch_rsi'] = stoch_rsi_val if not pd.isna(stoch_rsi_val) else 0.5
-            
-            # Ek göstergeler
-            indicators['current_price'] = current_price
-            
-        except Exception as e:
-            return {}
-        
-        return indicators
-    
-    def generate_signal(self, indicators):
-        """Göstergelere göre sinyal üret"""
-        if not indicators:
-            return 'NÖTR', 0
-        
-        buy_signals = 0
-        sell_signals = 0
-        
-        # RSI Sinyali
-        if indicators['rsi'] < 30:
-            buy_signals += 1
-        elif indicators['rsi'] > 70:
-            sell_signals += 1
-        
-        # MACD Sinyali
-        if indicators['macd'] > indicators['macd_signal']:
-            buy_signals += 1
-        else:
-            sell_signals += 1
-        
-        # Bollinger Bantları Sinyali
-        if indicators['bb_position'] < 0.2:
-            buy_signals += 1
-        elif indicators['bb_position'] > 0.8:
-            sell_signals += 1
-        
-        # EMA Sinyali
-        if indicators['ema_9'] > indicators['ema_21']:
-            buy_signals += 1
-        else:
-            sell_signals += 1
-        
-        # VWAP Sinyali
-        if indicators['current_price'] > indicators['vwap']:
-            buy_signals += 1
-        else:
-            sell_signals += 1
-        
-        # Toplam sinyal sayısı
-        total_signals = 5
-        
-        # Güven skoru
-        confidence = max(buy_signals, sell_signals) / total_signals * 100
-        
-        if buy_signals >= 3:
-            return 'AL', confidence
-        elif sell_signals >= 3:
-            return 'SAT', confidence
-        else:
-            return 'NÖTR', confidence
+    is_overbought = last_rsi > 70
+    is_macd_negative = last_macd < 0
+    is_near_upper_band = last_close >= last_upper_band * 0.99
 
-def main():
-    app = CryptoSignalApp()
+    if is_overbought and is_macd_negative and is_near_upper_band:
+        return {
+            "signal": "GÜÇLÜ SAT", 
+            "reason": f"RSI({last_rsi:.2f}) aşırı alım bölgesinde ve fiyat üst banda yakın. MACD düşüş gösteriyor.", 
+            "price": last_close
+        }
+
+    # Weaker signals (can be filtered out)
+    if last_rsi < 40 and is_macd_positive:
+         return {"signal": "Al", "reason": f"RSI({last_rsi:.2f}) ve MACD yükseliş gösteriyor.", "price": last_close}
+    if last_rsi > 60 and is_macd_negative:
+         return {"signal": "Sat", "reason": f"RSI({last_rsi:.2f}) ve MACD düşüş gösteriyor.", "price": last_close}
+
+    return {"signal": "Nötr", "reason": "Güçlü bir sinyal koşulu sağlanmadı.", "price": last_close}
+
+# --- Streamlit Action Functions ---
+
+def run_scan():
+    """ Runs the scanner and updates session state. """
+    st.toast("Tarama Başlatılıyor...", icon='🔍')
     
-    # Başlık
-    st.markdown('<h1 class="main-header">🚀 Kripto Sinyal Sistemi</h1>', unsafe_allow_html=True)
+    new_results = []
     
-    # Sidebar - Basitleştirilmiş kontroller
-    with st.sidebar:
-        st.header("⚙️ Ayarlar")
+    # Use st.progress for visual feedback
+    progress_bar = st.progress(0, text="Semboller Analiz Ediliyor...")
+    
+    for i, symbol in enumerate(SYMBOLS):
+        df = fetch_mock_data(symbol)
+        analysis = generate_composite_signal(df)
         
-        exchange = st.selectbox(
-            "Borsa:",
-            options=list(app.exchanges.keys()),
-            format_func=lambda x: app.exchanges[x]
+        signal_type = analysis['signal']
+        price = analysis.get('price', 0)
+        
+        if "GÜÇLÜ" in signal_type:
+            new_results.append({
+                "Sembol": symbol,
+                "Sinyal": signal_type,
+                "Fiyat": f"{price:.4f}",
+                "Açıklama": analysis['reason']
+            })
+            
+        progress_bar.progress((i + 1) / len(SYMBOLS), text=f"Semboller Analiz Ediliyor: {symbol}")
+
+    # Store only the strong signals in the session state
+    df_new_results = pd.DataFrame(new_results)
+    st.session_state[SCAN_RESULTS_KEY] = df_new_results
+    progress_bar.empty()
+    st.toast(f"Tarama Tamamlandı. {len(new_results)} güçlü sinyal bulundu.", icon='✅')
+
+    # Immediately generate market summary if results exist
+    if not df_new_results.empty:
+        generate_market_summary(df_new_results)
+
+
+def check_targets():
+    """ Checks if saved signals have hit their target prices. """
+    st.toast("Hedefler Kontrol Ediliyor...", icon='🎯')
+    updated_count = 0
+    
+    for signal in st.session_state.saved_signals:
+        if signal['status'] == 'Takip Ediliyor':
+            # Mock data fetch for current price
+            df = fetch_mock_data(signal['symbol'], period=1)
+            if df.empty: continue
+            current_price = df['Close'].iloc[-1]
+            
+            entry = signal['entry_price']
+            target = signal['target_price']
+            
+            # Target Hit Logic
+            if "AL" in signal['signal_type'] and current_price >= target:
+                signal['status'] = 'Hedefe Ulaşıldı'
+                updated_count += 1
+            elif "SAT" in signal['signal_type'] and current_price <= target:
+                signal['status'] = 'Hedefe Ulaşıldı'
+                updated_count += 1
+            # Stop-Loss Mock Logic (e.g., 3% loss)
+            elif "AL" in signal['signal_type'] and current_price <= entry * 0.97:
+                 signal['status'] = 'Zarar Durumu'
+                 updated_count += 1
+            elif "SAT" in signal['signal_type'] and current_price >= entry * 1.03:
+                 signal['status'] = 'Zarar Durumu'
+                 updated_count += 1
+
+    if updated_count > 0:
+        st.toast(f"🎉 {updated_count} sinyalin durumu güncellendi!", icon='⬆️')
+    else:
+        st.toast("Takip edilen sinyallerde durum değişikliği olmadı.", icon='➖')
+
+def save_signal_from_scan(row_data):
+    """ Adds a selected signal from the scan results to the saved list. """
+    
+    symbol = row_data["Sembol"]
+    signal = row_data["Sinyal"]
+    entry_price = float(row_data["Fiyat"])
+    
+    # Check if already tracking
+    if any(s['symbol'] == symbol and s['status'] == 'Takip Ediliyor' for s in st.session_state.saved_signals):
+        st.warning(f"{symbol} zaten takip listenizde mevcut.")
+        return
+
+    # Set Target Price (5% profit goal)
+    if "AL" in signal:
+        target_price = entry_price * 1.05
+    else: # GÜÇLÜ SAT
+        target_price = entry_price * 0.95
+        
+    # GEMINI: Get contextual analysis
+    context_analysis = get_signal_context(symbol, signal, entry_price)
+
+    st.session_state.saved_signals.append({
+        "symbol": symbol,
+        "entry_price": entry_price,
+        "target_price": target_price,
+        "signal_type": signal,
+        "entry_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "status": "Takip Ediliyor",
+        "context": context_analysis # New Gemini-powered field
+    })
+    st.toast(f"{symbol} sinyali kaydedildi! Hedef: {target_price:.4f}", icon='➕')
+
+# --- Main Streamlit Layout ---
+
+st.title("💰 AI Destekli Kripto Sinyal Paneli")
+st.markdown("Güçlü indikatörlerle taranan piyasa sinyallerini listeleyin ve hedeflerinizi takip edin.")
+
+# Top button to initiate scan
+st.button("Tüm Sembolleri Tara (Yeni Sinyal Üret)", on_click=run_scan, type="primary")
+
+# Gemini Powered Market Summary Display
+st.markdown("---")
+st.subheader("✨ Güncel Piyasa Özeti (Gemini Analizi)")
+
+if st.session_state.market_summary:
+    st.info(st.session_state.market_summary)
+else:
+    st.info("Piyasa özetini görmek için taramayı çalıştırın.")
+
+st.markdown("---")
+
+# Create two columns for the main layout
+col1, col2 = st.columns([2, 1])
+
+# --- Left Column: Scan Results ---
+with col1:
+    st.header("🔍 Tarama Sonuçları")
+    st.subheader("Güçlü Al/Sat Sinyalleri")
+    
+    if SCAN_RESULTS_KEY not in st.session_state or st.session_state[SCAN_RESULTS_KEY].empty:
+        st.info("Lütfen taramayı başlatın. Güçlü sinyal bulunduğunda burada listelenecektir.")
+    else:
+        df_scan = st.session_state[SCAN_RESULTS_KEY]
+        
+        # Streamlit Data Editor allows selecting rows
+        edited_df = st.data_editor(
+            df_scan, 
+            key="scan_editor", 
+            column_config={
+                "Sinyal": st.column_config.TextColumn(
+                    "Sinyal",
+                    help="Güçlü Al/Sat Sinyali",
+                    max_chars=15,
+                ),
+            },
+            hide_index=True,
+            use_container_width=True,
+            num_rows="dynamic",
         )
         
-        volume_threshold = st.selectbox(
-            "Minimum Hacim:",
-            options=[100000, 500000, 1000000, 5000000],
-            index=2
-        )
+        # Check if any row is selected to enable saving
+        selected_rows = st.session_state.scan_editor.get("selection", {}).get("rows", [])
         
-        analysis_limit = st.slider(
-            "Analiz Sayısı:",
-            min_value=5,
-            max_value=30,
-            value=15
-        )
-
-    # Ana içerik
-    if st.button("🔍 Sinyalleri Tara", type="primary", use_container_width=True):
-        with st.spinner("Çiftler taranıyor..."):
-            # Yüksek hacimli çiftleri getir
-            pairs = app.get_high_volume_pairs(
-                exchange=exchange,
-                volume_threshold=volume_threshold,
-                limit=analysis_limit
-            )
+        if selected_rows:
+            # Get the data of the first selected row
+            selected_index = selected_rows[0]
+            selected_data = df_scan.iloc[selected_index].to_dict()
             
-            if pairs:
-                st.success(f"{len(pairs)} çift bulundu!")
-                
-                # Sinyal analizi
-                signals = []
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                for i, pair in enumerate(pairs):
-                    symbol = pair['symbol']
-                    status_text.text(f"Analiz: {symbol}")
-                    
-                    # OHLCV verilerini getir
-                    df = app.fetch_ohlcv_data(symbol, exchange, '1h')
-                    
-                    if not df.empty:
-                        # Göstergeleri hesapla
-                        indicators = app.calculate_all_indicators(df)
-                        
-                        if indicators:
-                            # Sinyal üret
-                            signal, confidence = app.generate_signal(indicators)
-                            
-                            signals.append({
-                                'Sembol': symbol,
-                                'Sinyal': signal,
-                                'Güven': f"%{confidence:.0f}",
-                                'Fiyat': f"${indicators['current_price']:.4f}",
-                                'RSI': f"{indicators['rsi']:.1f}",
-                                'Volume': f"${pair['volume']:,.0f}"
-                            })
-                    
-                    # Progress bar güncelle
-                    progress_bar.progress((i + 1) / len(pairs))
-                
-                status_text.empty()
-                progress_bar.empty()
-                
-                # Sonuçları göster
-                if signals:
-                    st.subheader("📊 Sinyal Sonuçları")
-                    
-                    # Sinyalleri DataFrame'e dönüştür
-                    signals_df = pd.DataFrame(signals)
-                    
-                    # Renk fonksiyonu
-                    def color_row(row):
-                        if row['Sinyal'] == 'AL':
-                            return ['background-color: #d4edda'] * len(row)
-                        elif row['Sinyal'] == 'SAT':
-                            return ['background-color: #f8d7da'] * len(row)
-                        else:
-                            return ['background-color: #fff3cd'] * len(row)
-                    
-                    # DataFrame'i göster
-                    st.dataframe(
-                        signals_df.style.apply(color_row, axis=1),
-                        use_container_width=True,
-                        height=400
-                    )
-                    
-                    # Sadece AL sinyallerini göster
-                    buy_signals = [s for s in signals if s['Sinyal'] == 'AL']
-                    if buy_signals:
-                        st.subheader("🎯 AL Sinyalleri")
-                        for signal in buy_signals:
-                            st.info(f"**{signal['Sembol']}** - Güven: {signal['Güven']} - Fiyat: {signal['Fiyat']}")
-                    
-                else:
-                    st.warning("Hiç sinyal bulunamadı.")
-                
-                # Analiz verilerini session state'e kaydet
-                st.session_state.analysis_data = signals
-                
+            st.button(f"'{selected_data['Sembol']}' Sinyalini Kaydet ve Takibe Başla", 
+                      on_click=save_signal_from_scan, 
+                      args=(selected_data,), 
+                      type="primary",
+                      key="save_button")
+        else:
+             st.info("Kaydetmek istediğiniz sinyali tablodan seçiniz.")
+
+
+# --- Right Column: Tracking Signals ---
+with col2:
+    st.header("🎯 Hedef Takip Listesi")
+    st.subheader("Kaydedilen Sinyaller")
+    
+    # Button to check targets (This must be here to enable rerunning the check_targets logic)
+    st.button("Hedefleri Kontrol Et (Anlık Simülasyon)", on_click=check_targets, key="check_target_button")
+    
+    if not st.session_state.saved_signals:
+        st.info("Takip edilecek kaydedilmiş sinyal bulunmamaktadır.")
+    else:
+        # Convert list of dicts to DataFrame for display
+        df_tracking = pd.DataFrame(st.session_state.saved_signals)
+        
+        # Clean up columns for display
+        df_tracking_display = df_tracking[['symbol', 'entry_price', 'target_price', 'status', 'signal_type', 'entry_time', 'context']].copy()
+        df_tracking_display.columns = ['Sembol', 'Giriş Fiyatı', 'Hedef Fiyatı', 'Durum', 'Tip', 'Giriş Zamanı', '✨ Risk Analizi']
+
+        # Format numerical columns
+        df_tracking_display['Giriş Fiyatı'] = df_tracking_display['Giriş Fiyatı'].apply(lambda x: f"{x:.4f}")
+        df_tracking_display['Hedef Fiyatı'] = df_tracking_display['Hedef Fiyatı'].apply(lambda x: f"{x:.4f}")
+        
+        # Apply visual styling to the tracking table
+        def style_status(val):
+            if val == 'Hedefe Ulaşıldı':
+                color = 'background-color: #d4edda; color: #155724' # Green
+            elif val == 'Zarar Durumu':
+                color = 'background-color: #f8d7da; color: #721c24' # Red
+            elif val == 'Takip Ediliyor':
+                color = 'background-color: #fff3cd; color: #856404' # Yellow
             else:
-                st.error("Çift bulunamadı. Ayarları değiştirin.")
+                color = ''
+            return color
 
-    # Önceki analizi göster
-    if st.session_state.analysis_data:
-        st.subheader("📈 Önceki Analiz")
-        signals_df = pd.DataFrame(st.session_state.analysis_data)
-        st.dataframe(signals_df, use_container_width=True)
-
-if __name__ == "__main__":
-    main()
+        st.dataframe(
+            df_tracking_display.style.applymap(style_status, subset=['Durum']),
+            use_container_width=True,
+            hide_index=True
+        )
